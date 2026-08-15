@@ -134,7 +134,9 @@ Kết quả trả về là JSON dạng text. Lỗi trả về dưới dạng MCP
 |---|---|---|
 | `dbg_status` | — | Trạng thái phiên: đang debug? đang chạy/paused? danh sách tiến trình. |
 | `dbg_start` | `path` (bắt buộc), `args`, `working_dir`, `break_at_entry`, `runtime` | Khởi động 1 file .exe/.dll để debug. Tự nhận .NET (Core/5+) hay .NET Framework; file self-contained thì truyền `runtime` = `net` hoặc `netfx`. |
+| `dbg_list_attachable` | `name` | Liệt kê tiến trình .NET có thể attach. |
 | `dbg_attach` | `pid` hoặc `name` | Attach vào tiến trình .NET đang chạy (name cho phép ký tự đại diện `*` `?`). |
+| `dbg_set_thread` | `thread_id` | Đặt thread hiện tại làm ngữ cảnh mặc định cho callstack/locals/eval. |
 | `dbg_break` | — | Tạm dừng (pause) tất cả tiến trình. |
 | `dbg_continue` | — | Chạy tiếp tất cả. |
 | `dbg_stop` | — | Kết thúc debug (terminate). |
@@ -142,16 +144,21 @@ Kết quả trả về là JSON dạng text. Lỗi trả về dưới dạng MCP
 | `dbg_step` | `kind` = `into`\|`over`\|`out` (bắt buộc), `timeout_ms` | Step luồng đang paused và chờ hoàn thành, trả về frame trên cùng. |
 | `dbg_wait_for_break` | `timeout_ms` | Chặn cho tới khi có tiến trình paused (trúng breakpoint / step xong / break), hoặc timeout. |
 
-### Breakpoint (theo IL offset)
+### Breakpoint
 
-Breakpoint được xác định bằng **tên module + metadata token của method + IL offset**. Đặt được cả trước khi tiến trình chạy (sẽ bind khi module được nạp).
+Đặt được cả trước khi tiến trình chạy (sẽ bind khi module được nạp).
 
 | Tool | Tham số | Mô tả |
 |---|---|---|
-| `bp_add` | `module` (bắt buộc), `token` (bắt buộc), `il_offset`, `condition`, `enabled` | Thêm breakpoint. `token`/`il_offset` chấp nhận hex (`0x06000001`) hoặc thập phân. `condition` là biểu thức C#/VB. |
+| `bp_add` | `module`, `token` (bắt buộc), `il_offset`, `condition`, `hit_count`, `enabled` | Breakpoint theo metadata token. `token`/`il_offset` nhận hex (`0x06000001`) hoặc thập phân. `hit_count` = chỉ dừng sau N lần trúng. |
+| `bp_add_method` | `module`, `method` (bắt buộc), `condition`, `enabled` | Breakpoint theo tên method đầy đủ (`MyApp.Program.Main`) — không cần token. Đặt cho mọi overload. Module là đường dẫn hoặc đã mở trong dnSpy. |
+| `bp_add_line` | `module`, `method`, `line` (bắt buộc), `enabled` | Breakpoint theo dòng nguồn trong method (cần PDB). |
 | `bp_list` | — | Liệt kê breakpoint: id, vị trí, bật/tắt, số lần trúng, số bound. |
 | `bp_remove` | `id` hoặc `all` | Xóa 1 breakpoint theo id, hoặc tất cả. |
 | `bp_toggle` | `id`, `enabled` | Bật/tắt breakpoint. |
+| `mbp_add` | `module_name` (pattern, bắt buộc), `enabled` | Module-load breakpoint: dừng khi module khớp pattern được nạp. |
+| `mbp_list` / `mbp_remove` | — / `id`\|`all` | Liệt kê / xóa module breakpoint. |
+| `exc_break` | `exception` (tên đầy đủ hoặc `all`), `enabled` | Bật/tắt dừng khi ném exception CLR (first-chance). |
 
 ### Kiểm tra (yêu cầu tiến trình đang paused)
 
@@ -161,7 +168,19 @@ Breakpoint được xác định bằng **tên module + metadata token của met
 | `dbg_modules` | — | Liệt kê module đã nạp (tên, đường dẫn, địa chỉ, kích thước, dynamic/in-memory). |
 | `dbg_callstack` | `thread_id`, `max_frames` | Call stack của thread paused (mặc định thread hiện tại, tối đa 200 frame, giới hạn 1000). |
 | `dbg_locals` | `frame_index`, `thread_id` | Biến local + tham số của 1 frame (mặc định frame 0 = trên cùng). |
+| `dbg_variables` | `kind` = `autos`\|`returns`\|`statics`\|`exceptions`, `frame_index`, `thread_id` | Liệt kê nhóm biến khác. |
 | `dbg_eval` | `expression` (bắt buộc), `frame_index`, `thread_id` | Đánh giá biểu thức C#/VB trong ngữ cảnh 1 frame. |
+| `dbg_expand` | `expression` (bắt buộc), `frame_index`, `max_children`, `thread_id` | Liệt kê thành viên con (field/phần tử) của 1 biểu thức — drill vào object/mảng. |
+| `dbg_set_variable` | `target`, `value` (bắt buộc), `frame_index`, `thread_id` | Gán giá trị mới cho biến/biểu thức. |
+| `dbg_set_next_statement` | `il_offset` (bắt buộc), `thread_id` | Dời con trỏ thực thi tới IL offset khác trong cùng method. |
+| `dbg_read_memory` | `address`, `size` (bắt buộc), `pid` | Đọc byte thô từ memory tiến trình, trả về hex (tối đa 65536 byte). |
+| `dbg_write_memory` | `address`, `bytes` (bắt buộc), `pid` | Ghi byte thô (hex) vào memory tiến trình. |
+
+Tool chỉ đọc mang annotation `readOnlyHint`; tool thay đổi tiến trình (`dbg_start`, `dbg_write_memory`, `dbg_set_variable`, …) mang `destructiveHint` để client cảnh báo.
+
+### Nhận sự kiện realtime (SSE)
+
+Client có thể mở stream `GET /mcp` với header `Accept: text/event-stream`. Server đẩy notification JSON-RPC `notifications/paused` mỗi khi tiến trình dừng (trúng breakpoint / step xong / break), giúp agent phản ứng tức thì mà không cần poll `dbg_wait_for_break`.
 
 ---
 
@@ -222,16 +241,38 @@ Lưu ý: cơ chế trên **không** cô lập bạn khỏi phần mềm khác ch
 
 ## 9. Dùng từ macOS / Linux
 
-Server bắt buộc Windows, nhưng MCP client chạy ở đâu cũng được. Nếu dnSpy chạy trong máy ảo Windows (Parallels/UTM/VMware) hoặc máy Windows từ xa:
+Server bắt buộc Windows, nhưng MCP client chạy ở đâu cũng được. Nếu dnSpy chạy trong máy ảo Windows (Parallels/UTM/VMware) hoặc máy Windows từ xa.
 
-Vì server chỉ bind loopback, cần forward cổng về máy của bạn:
+### Chạy trong Parallels Desktop (build & test runtime)
+
+1. **Chia sẻ mã nguồn vào VM.** Parallels tự mount thư mục Mac: trong VM Windows, repo nằm tại `\\Mac\Home\GolandProjects\github.com\lang315\dnSpy` (hoặc bật *Share Mac → Home folder*). Có thể build ngay từ đó, hoặc copy repo vào ổ đĩa VM cho nhanh.
+2. **Cài .NET 10 SDK** trong VM (https://dot.net) nếu chưa có.
+3. **Init submodule + build dnSpy** (PowerShell trong VM):
+   ```powershell
+   cd C:\dnSpy            # hoặc \\Mac\Home\...\dnSpy
+   git submodule update --init --recursive
+   .\build.ps1 net
+   ```
+   Extension `dnSpy.MCP.x.dll` được đóng gói cùng vào `dnSpy\dnSpy\bin\Release\net10.0-windows\`.
+4. **Chạy dnSpy** từ thư mục build đó. Kiểm tra server:
+   ```powershell
+   curl.exe http://127.0.0.1:27115/mcp     # → "dnSpy MCP server"
+   ```
+5. **Verify tool** (trong VM): mở 1 .NET exe bằng dnSpy, rồi:
+   ```powershell
+   curl.exe http://127.0.0.1:27115/mcp -H "content-type: application/json" -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"dbg_status\",\"arguments\":{}}}"
+   ```
+
+### Kết nối MCP client trên macOS (host)
+
+Server bind loopback trong VM. Forward cổng ra host qua SSH (bật OpenSSH Server trong Windows) hoặc dùng IP của VM nếu Parallels ở chế độ *Shared/Bridged* — nhưng khi đó Host header không còn là loopback nên guard sẽ chặn. Cách sạch nhất là **tunnel về loopback**:
 
 ```sh
-# tunnel cổng 27115 từ máy Windows về máy local qua SSH
-ssh -L 27115:127.0.0.1:27115 user@windows-host
+# trên macOS host — tunnel cổng 27115 của VM về loopback máy Mac
+ssh -L 27115:127.0.0.1:27115 user@<địa-chỉ-VM-Windows>
 ```
 
-Sau đó trỏ MCP client tới `http://127.0.0.1:27115/mcp` như bình thường. Guard Host vẫn cho qua vì Host = loopback.
+Rồi trỏ MCP client tới `http://127.0.0.1:27115/mcp`. Guard Host cho qua vì Host = loopback. (Nếu bật `DNSPY_MCP_TOKEN`, thêm header `Authorization: Bearer <token>`.)
 
 > **Wine/CrossOver:** dnSpy có `WineFixes.cs` nên giao diện chạy được trên Wine, nhưng debug engine CorDebug cần API Windows thật — Wine không cung cấp đủ, nên tính năng debug không đáng tin. Khuyến nghị dùng máy ảo Windows thật.
 

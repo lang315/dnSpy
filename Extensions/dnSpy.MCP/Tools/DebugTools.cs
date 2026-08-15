@@ -44,9 +44,6 @@ namespace dnSpy.MCP.Tools {
 
 		DbgManager Mgr => dbg.DbgManager;
 
-		// net48 has no Math.Clamp.
-		static int Clamp(int value, int min, int max) => value < min ? min : value > max ? max : value;
-
 		public IEnumerable<ToolDef> Create() {
 			yield return new ToolDef("dbg_status",
 				"Get the current debug session status: whether debugging, running/paused, and the list of debugged processes.",
@@ -63,12 +60,24 @@ namespace dnSpy.MCP.Tools {
 					("runtime", Schema.Str("Force runtime: 'net' (Core/5+) or 'netfx' (Framework)"), false)),
 				Start);
 
+			yield return new ToolDef("dbg_list_attachable",
+				"List running .NET processes that can be attached to.",
+				Schema.Object(
+					("name", Schema.Str("Filter by process name (wildcards * and ? allowed)"), false)),
+				ListAttachable);
+
 			yield return new ToolDef("dbg_attach",
 				"Attach the debugger to a running .NET process by pid or process name.",
 				Schema.Object(
 					("pid", Schema.Int("Process id to attach to"), false),
 					("name", Schema.Str("Process name to attach to (wildcards * and ? allowed)"), false)),
 				Attach);
+
+			yield return new ToolDef("dbg_set_thread",
+				"Set the current thread, used as the default context for callstack/locals/eval.",
+				Schema.Object(
+					("thread_id", Schema.Int("Native thread id"), true)),
+				SetThread);
 
 			yield return new ToolDef("dbg_break",
 				"Break (pause) all debugged processes.",
@@ -148,6 +157,33 @@ namespace dnSpy.MCP.Tools {
 			if (File.Exists(baseName + ".runtimeconfig.json"))
 				return true;
 			return string.Equals(Path.GetExtension(path), ".dll", StringComparison.OrdinalIgnoreCase);
+		}
+
+		string ListAttachable(JObject args) {
+			var name = (string?)args["name"];
+			var processes = attachService.Value.GetAttachableProcessesAsync(
+				name is null ? null : new[] { name }, null, null, CancellationToken.None).GetAwaiter().GetResult();
+			var arr = new JArray(processes.Select(p => (object)new JObject {
+				["pid"] = p.ProcessId,
+				["name"] = p.Name,
+				["title"] = p.Title,
+				["runtime"] = p.RuntimeName,
+				["architecture"] = p.Architecture.ToString(),
+			}).ToArray());
+			return Json(arr);
+		}
+
+		string SetThread(JObject args) {
+			var threadId = (ulong)(long)(args["thread_id"] ?? throw new ArgumentException("'thread_id' is required"));
+			return dbg.Invoke(() => {
+				foreach (var p in Mgr.Processes)
+					foreach (var t in p.Threads)
+						if (t.Id == threadId) {
+							Mgr.CurrentThread.Current = t;
+							return $"current thread set to {threadId}";
+						}
+				throw new InvalidOperationException($"no thread with id {threadId}");
+			});
 		}
 
 		string Attach(JObject args) {

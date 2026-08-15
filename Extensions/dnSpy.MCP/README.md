@@ -40,25 +40,44 @@ Or add to your MCP client config:
 }
 ```
 
-## Tools
+## Tools (32)
 
 Session control:
 - `dbg_status` — is-debugging / running / process list
 - `dbg_start` — launch an exe/dll (auto-detects .NET vs .NET Framework; `runtime` overrides)
+- `dbg_list_attachable` — list attachable .NET processes
 - `dbg_attach` — attach by `pid` or process `name`
+- `dbg_set_thread` — set the default thread context
 - `dbg_break`, `dbg_continue`, `dbg_stop`, `dbg_restart`
 - `dbg_step` — `into` / `over` / `out`, waits for completion
 - `dbg_wait_for_break` — block until a process pauses
 
-Breakpoints (IL-offset, by module + metadata token):
-- `bp_add` — `module`, `token`, optional `il_offset`, `condition`, `enabled`
+Breakpoints:
+- `bp_add` — by module + metadata `token` (+ `il_offset`, `condition`, `hit_count`, `enabled`)
+- `bp_add_method` — by fully-qualified method name (no token needed; sets one per overload)
+- `bp_add_line` — by source `line` in a method (needs the PDB)
 - `bp_list`, `bp_remove` (`id` or `all`), `bp_toggle`
+- `mbp_add` / `mbp_list` / `mbp_remove` — module-load breakpoints (break when a module loads)
+- `exc_break` — break when a CLR exception is thrown (all, or a named type)
 
 Inspection (require a paused process):
 - `dbg_threads`, `dbg_modules`
 - `dbg_callstack` — `thread_id?`, `max_frames?`
 - `dbg_locals` — `frame_index?`, `thread_id?`
+- `dbg_variables` — `autos` / `returns` / `statics` / `exceptions`
 - `dbg_eval` — C#/VB `expression` in a frame's context
+- `dbg_expand` — list an expression's child members (drill into objects/arrays)
+- `dbg_set_variable` — assign a new value to a variable
+- `dbg_set_next_statement` — move the instruction pointer to another IL offset
+- `dbg_read_memory` / `dbg_write_memory` — raw process memory as hex
+
+Read-only tools carry a `readOnlyHint` annotation; process-changing tools (`dbg_start`, `dbg_write_memory`, `dbg_set_variable`, …) carry `destructiveHint`.
+
+## Live notifications (SSE)
+
+Clients may open a `GET /mcp` stream with `Accept: text/event-stream`. The server pushes a
+`notifications/paused` JSON-RPC notification whenever a debugged process pauses (breakpoint hit,
+step complete, break), so an agent can react without polling `dbg_wait_for_break`.
 
 ## Manual smoke test
 
