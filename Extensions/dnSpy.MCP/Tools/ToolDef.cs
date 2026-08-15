@@ -30,12 +30,19 @@ namespace dnSpy.MCP.Tools {
 		public string Description { get; }
 		public JObject InputSchema { get; }
 		public Func<JObject, string> Handler { get; }
+		/// <summary>Tool only reads state (MCP <c>readOnlyHint</c>).</summary>
+		public bool ReadOnly { get; }
+		/// <summary>Tool may change program/debugger state destructively (MCP <c>destructiveHint</c>).</summary>
+		public bool Destructive { get; }
 
-		public ToolDef(string name, string description, JObject inputSchema, Func<JObject, string> handler) {
+		public ToolDef(string name, string description, JObject inputSchema, Func<JObject, string> handler,
+			bool readOnly = false, bool destructive = false) {
 			Name = name;
 			Description = description;
 			InputSchema = inputSchema;
 			Handler = handler;
+			ReadOnly = readOnly;
+			Destructive = destructive;
 		}
 	}
 

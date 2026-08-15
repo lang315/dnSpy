@@ -60,26 +60,26 @@ namespace dnSpy.MCP.Tools {
 			yield return new ToolDef("dbg_threads",
 				"List the threads of the debugged process(es).",
 				Schema.Object(),
-				_ => Threads());
+				_ => Threads(), readOnly: true);
 
 			yield return new ToolDef("dbg_modules",
 				"List the loaded modules (assemblies) of the debugged process(es).",
 				Schema.Object(),
-				_ => Modules());
+				_ => Modules(), readOnly: true);
 
 			yield return new ToolDef("dbg_callstack",
 				"Get the call stack of the paused thread (or a specific thread by id).",
 				Schema.Object(
 					("thread_id", Schema.Int("Native thread id; defaults to the current thread"), false),
 					("max_frames", Schema.Int("Maximum frames to return (default 200)"), false)),
-				CallStack);
+				CallStack, readOnly: true);
 
 			yield return new ToolDef("dbg_locals",
 				"Get the local variables and parameters of a stack frame on the paused thread.",
 				Schema.Object(
 					("frame_index", Schema.Int("Frame index, 0 = top (default 0)"), false),
 					("thread_id", Schema.Int("Native thread id; defaults to the current thread"), false)),
-				Locals);
+				Locals, readOnly: true);
 
 			yield return new ToolDef("dbg_eval",
 				"Evaluate a C#/VB expression in the context of a stack frame on the paused thread.",
@@ -113,14 +113,14 @@ namespace dnSpy.MCP.Tools {
 					("value", Schema.Str("Right-hand side expression"), true),
 					("frame_index", Schema.Int("Frame index, 0 = top (default 0)"), false),
 					("thread_id", Schema.Int("Native thread id; defaults to the current thread"), false)),
-				SetVariable);
+				SetVariable, destructive: true);
 
 			yield return new ToolDef("dbg_set_next_statement",
 				"Move the instruction pointer of the paused top frame to a different IL offset in the same method.",
 				Schema.Object(
 					("il_offset", Schema.Str("Target IL offset, hex or decimal"), true),
 					("thread_id", Schema.Int("Native thread id; defaults to the current thread"), false)),
-				SetNextStatement);
+				SetNextStatement, destructive: true);
 		}
 
 		string Threads() => dbg.Invoke(() => {
@@ -142,8 +142,7 @@ namespace dnSpy.MCP.Tools {
 
 		string CallStack(JObject args) {
 			var threadId = (ulong?)(long?)args["thread_id"];
-			var maxFramesRaw = (int?)args["max_frames"] ?? 200;
-			var maxFrames = maxFramesRaw < 1 ? 1 : maxFramesRaw > 1000 ? 1000 : maxFramesRaw;
+			var maxFrames = Clamp((int?)args["max_frames"] ?? 200, 1, 1000);
 			return dbg.Invoke(() => {
 				var thread = ResolveThread(threadId);
 				var language = languageService.Value.GetCurrentLanguage(thread.Runtime.RuntimeKindGuid);
@@ -176,7 +175,10 @@ namespace dnSpy.MCP.Tools {
 			});
 		}
 
-		string Locals(JObject args) {
+		// Every eval-based tool resolves the frame (from frame_index/thread_id), creates a language
+		// context + eval info on the dispatcher, runs its body, and closes the context in a finally.
+		// Only the body differs, so it takes (evalInfo, language) and returns the text result.
+		string WithFrame(JObject args, Func<DbgEvaluationInfo, DbgLanguage, string> body) {
 			var frameIndex = (int?)args["frame_index"] ?? 0;
 			var threadId = (ulong?)(long?)args["thread_id"];
 			return dbg.Invoke(() => {
@@ -184,18 +186,7 @@ namespace dnSpy.MCP.Tools {
 				var context = language.CreateContext(frame, cancellationToken: CancellationToken.None);
 				try {
 					var evalInfo = new DbgEvaluationInfo(context, frame, CancellationToken.None);
-					var nodes = language.LocalsProvider.GetNodes(evalInfo, DbgValueNodeEvaluationOptions.None, DbgLocalsValueNodeEvaluationOptions.None);
-					var writer = new DbgStringBuilderTextWriter();
-					var arr = new JArray();
-					foreach (var info in nodes) {
-						var node = info.ValueNode;
-						arr.Add(new JObject {
-							["kind"] = info.Kind.ToString(),
-							["name"] = FormatName(node, evalInfo, writer),
-							["value"] = node.HasError ? node.ErrorMessage : FormatValue(node, evalInfo, writer),
-						});
-					}
-					return Json(arr);
+					return body(evalInfo, language);
 				}
 				finally {
 					context.Close();
@@ -203,130 +194,105 @@ namespace dnSpy.MCP.Tools {
 			});
 		}
 
+		string Locals(JObject args) => WithFrame(args, (evalInfo, language) => {
+			var nodes = language.LocalsProvider.GetNodes(evalInfo, DbgValueNodeEvaluationOptions.None, DbgLocalsValueNodeEvaluationOptions.None);
+			var writer = new DbgStringBuilderTextWriter();
+			var arr = new JArray();
+			foreach (var info in nodes) {
+				var node = info.ValueNode;
+				arr.Add(new JObject {
+					["kind"] = info.Kind.ToString(),
+					["name"] = FormatName(node, evalInfo, writer),
+					["value"] = node.HasError ? node.ErrorMessage : FormatValue(node, evalInfo, writer),
+				});
+			}
+			return Json(arr);
+		});
+
 		string Eval(JObject args) {
 			var expression = (string?)args["expression"] ?? throw new ArgumentException("'expression' is required");
-			var frameIndex = (int?)args["frame_index"] ?? 0;
-			var threadId = (ulong?)(long?)args["thread_id"];
-			return dbg.Invoke(() => {
-				var (frame, language) = ResolveFrame(threadId, frameIndex);
-				var context = language.CreateContext(frame, cancellationToken: CancellationToken.None);
+			return WithFrame(args, (evalInfo, language) => {
+				var ee = language.ExpressionEvaluator;
+				var result = ee.Evaluate(evalInfo, expression, DbgEvaluationOptions.Expression, ee.CreateExpressionEvaluatorState());
+				if (result.Error is not null)
+					throw new InvalidOperationException(result.Error);
+				var value = result.Value!;
 				try {
-					var evalInfo = new DbgEvaluationInfo(context, frame, CancellationToken.None);
-					var ee = language.ExpressionEvaluator;
-					var result = ee.Evaluate(evalInfo, expression, DbgEvaluationOptions.Expression, ee.CreateExpressionEvaluatorState());
-					if (result.Error is not null)
-						throw new InvalidOperationException(result.Error);
-					var value = result.Value!;
-					try {
-						var writer = new DbgStringBuilderTextWriter();
-						language.Formatter.FormatValue(evalInfo, writer, value, DbgValueFormatterOptions.None, null);
-						return Json(new JObject {
-							["expression"] = expression,
-							["value"] = writer.Text,
-							["isThrownException"] = result.IsThrownException,
-						});
-					}
-					finally {
-						value.Close();
-					}
+					var writer = new DbgStringBuilderTextWriter();
+					language.Formatter.FormatValue(evalInfo, writer, value, DbgValueFormatterOptions.None, null);
+					return Json(new JObject {
+						["expression"] = expression,
+						["value"] = writer.Text,
+						["isThrownException"] = result.IsThrownException,
+					});
 				}
 				finally {
-					context.Close();
+					value.Close();
 				}
 			});
 		}
 
 		string Expand(JObject args) {
 			var expression = (string?)args["expression"] ?? throw new ArgumentException("'expression' is required");
-			var frameIndex = (int?)args["frame_index"] ?? 0;
 			var maxChildren = Clamp((int?)args["max_children"] ?? 100, 1, 1000);
-			var threadId = (ulong?)(long?)args["thread_id"];
-			return dbg.Invoke(() => {
-				var (frame, language) = ResolveFrame(threadId, frameIndex);
-				var context = language.CreateContext(frame, cancellationToken: CancellationToken.None);
-				try {
-					var evalInfo = new DbgEvaluationInfo(context, frame, CancellationToken.None);
-					var ee = language.ExpressionEvaluator;
-					var res = language.ValueNodeFactory.Create(evalInfo, expression,
-						DbgValueNodeEvaluationOptions.None, DbgEvaluationOptions.Expression, ee.CreateExpressionEvaluatorState());
-					var node = res.ValueNode;
-					var writer = new DbgStringBuilderTextWriter();
-					var obj = new JObject {
-						["expression"] = expression,
-						["value"] = node.HasError ? node.ErrorMessage : FormatValue(node, evalInfo, writer),
-						["hasChildren"] = node.HasChildren == true,
-					};
-					if (node.HasChildren == true) {
-						var count = node.GetChildCount(evalInfo);
-						var take = (int)Math.Min((ulong)maxChildren, count);
-						var arr = new JArray();
-						foreach (var child in node.GetChildren(evalInfo, 0, take, DbgValueNodeEvaluationOptions.None)) {
-							arr.Add(new JObject {
-								["name"] = FormatName(child, evalInfo, writer),
-								["value"] = child.HasError ? child.ErrorMessage : FormatValue(child, evalInfo, writer),
-							});
-						}
-						obj["childCount"] = (long)count;
-						obj["children"] = arr;
+			return WithFrame(args, (evalInfo, language) => {
+				var ee = language.ExpressionEvaluator;
+				var res = language.ValueNodeFactory.Create(evalInfo, expression,
+					DbgValueNodeEvaluationOptions.None, DbgEvaluationOptions.Expression, ee.CreateExpressionEvaluatorState());
+				var node = res.ValueNode;
+				var writer = new DbgStringBuilderTextWriter();
+				var obj = new JObject {
+					["expression"] = expression,
+					["value"] = node.HasError ? node.ErrorMessage : FormatValue(node, evalInfo, writer),
+					["hasChildren"] = node.HasChildren == true,
+				};
+				if (node.HasChildren == true) {
+					var count = node.GetChildCount(evalInfo);
+					var take = (int)Math.Min((ulong)maxChildren, count);
+					var arr = new JArray();
+					foreach (var child in node.GetChildren(evalInfo, 0, take, DbgValueNodeEvaluationOptions.None)) {
+						arr.Add(new JObject {
+							["name"] = FormatName(child, evalInfo, writer),
+							["value"] = child.HasError ? child.ErrorMessage : FormatValue(child, evalInfo, writer),
+						});
 					}
-					return Json(obj);
+					obj["childCount"] = (long)count;
+					obj["children"] = arr;
 				}
-				finally {
-					context.Close();
-				}
+				return Json(obj);
 			});
 		}
 
 		string Variables(JObject args) {
 			var kind = ((string?)args["kind"] ?? throw new ArgumentException("'kind' is required")).ToLowerInvariant();
-			var frameIndex = (int?)args["frame_index"] ?? 0;
-			var threadId = (ulong?)(long?)args["thread_id"];
-			return dbg.Invoke(() => {
-				var (frame, language) = ResolveFrame(threadId, frameIndex);
-				var context = language.CreateContext(frame, cancellationToken: CancellationToken.None);
-				try {
-					var evalInfo = new DbgEvaluationInfo(context, frame, CancellationToken.None);
-					DbgValueNodeProvider provider = kind switch {
-						"autos" => language.AutosProvider,
-						"returns" => language.ReturnValuesProvider,
-						"statics" => language.StaticFieldsProvider,
-						"exceptions" => language.ExceptionsProvider,
-						_ => throw new ArgumentException("'kind' must be autos, returns, statics, or exceptions"),
-					};
-					var writer = new DbgStringBuilderTextWriter();
-					var arr = new JArray();
-					foreach (var node in provider.GetNodes(evalInfo, DbgValueNodeEvaluationOptions.None)) {
-						arr.Add(new JObject {
-							["name"] = FormatName(node, evalInfo, writer),
-							["value"] = node.HasError ? node.ErrorMessage : FormatValue(node, evalInfo, writer),
-						});
-					}
-					return Json(arr);
+			return WithFrame(args, (evalInfo, language) => {
+				DbgValueNodeProvider provider = kind switch {
+					"autos" => language.AutosProvider,
+					"returns" => language.ReturnValuesProvider,
+					"statics" => language.StaticFieldsProvider,
+					"exceptions" => language.ExceptionsProvider,
+					_ => throw new ArgumentException("'kind' must be autos, returns, statics, or exceptions"),
+				};
+				var writer = new DbgStringBuilderTextWriter();
+				var arr = new JArray();
+				foreach (var node in provider.GetNodes(evalInfo, DbgValueNodeEvaluationOptions.None)) {
+					arr.Add(new JObject {
+						["name"] = FormatName(node, evalInfo, writer),
+						["value"] = node.HasError ? node.ErrorMessage : FormatValue(node, evalInfo, writer),
+					});
 				}
-				finally {
-					context.Close();
-				}
+				return Json(arr);
 			});
 		}
 
 		string SetVariable(JObject args) {
 			var target = (string?)args["target"] ?? throw new ArgumentException("'target' is required");
 			var value = (string?)args["value"] ?? throw new ArgumentException("'value' is required");
-			var frameIndex = (int?)args["frame_index"] ?? 0;
-			var threadId = (ulong?)(long?)args["thread_id"];
-			return dbg.Invoke(() => {
-				var (frame, language) = ResolveFrame(threadId, frameIndex);
-				var context = language.CreateContext(frame, cancellationToken: CancellationToken.None);
-				try {
-					var evalInfo = new DbgEvaluationInfo(context, frame, CancellationToken.None);
-					var result = language.ExpressionEvaluator.Assign(evalInfo, target, value, DbgEvaluationOptions.Expression);
-					if (result.Error is not null)
-						throw new InvalidOperationException(result.Error);
-					return $"{target} = {value}";
-				}
-				finally {
-					context.Close();
-				}
+			return WithFrame(args, (evalInfo, language) => {
+				var result = language.ExpressionEvaluator.Assign(evalInfo, target, value, DbgEvaluationOptions.Expression);
+				if (result.Error is not null)
+					throw new InvalidOperationException(result.Error);
+				return $"{target} = {value}";
 			});
 		}
 

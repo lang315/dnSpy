@@ -45,15 +45,6 @@ namespace dnSpy.MCP.Server {
 
 		static readonly string[] SupportedProtocolVersions = { "2025-06-18", "2025-03-26", "2024-11-05" };
 
-		// Tools that only read state (safe to call freely) vs. tools that change program/debugger state.
-		static readonly HashSet<string> ReadOnlyTools = new(StringComparer.Ordinal) {
-			"dbg_status", "dbg_threads", "dbg_modules", "dbg_callstack", "dbg_locals",
-			"dbg_read_memory", "bp_list", "mbp_list", "dbg_list_attachable", "dbg_wait_for_break",
-		};
-		static readonly HashSet<string> DestructiveTools = new(StringComparer.Ordinal) {
-			"dbg_start", "dbg_stop", "dbg_restart", "dbg_write_memory", "dbg_set_variable", "dbg_set_next_statement",
-		};
-
 		readonly HttpListener listener;
 		readonly IReadOnlyDictionary<string, ToolDef> tools;
 		readonly IReadOnlyList<ToolDef> toolList;
@@ -312,7 +303,7 @@ namespace dnSpy.MCP.Server {
 					["description"] = t.Description,
 					["inputSchema"] = t.InputSchema,
 				};
-				var annotations = Annotations(t.Name);
+				var annotations = Annotations(t);
 				if (annotations is not null)
 					tool["annotations"] = annotations;
 				arr.Add(tool);
@@ -320,10 +311,10 @@ namespace dnSpy.MCP.Server {
 			return new JObject { ["tools"] = arr };
 		}
 
-		static JObject? Annotations(string name) {
-			if (ReadOnlyTools.Contains(name))
+		static JObject? Annotations(ToolDef tool) {
+			if (tool.ReadOnly)
 				return new JObject { ["readOnlyHint"] = true };
-			if (DestructiveTools.Contains(name))
+			if (tool.Destructive)
 				return new JObject { ["destructiveHint"] = true };
 			return null;
 		}
