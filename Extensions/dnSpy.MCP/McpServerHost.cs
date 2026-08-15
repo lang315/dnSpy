@@ -82,18 +82,19 @@ namespace dnSpy.MCP {
 			if (server is not null)
 				return;
 
-			var dbg = new DbgAccess(dbgManager.Value);
-			var tools = new List<ToolDef>();
-			tools.AddRange(new DebugTools(dbg, attachService).Create());
-			tools.AddRange(new BreakpointTools(dbg, bpService, bpFactory, hitCountService, codeLocationFactory, moduleIdProvider, documentService).Create());
-			tools.AddRange(new InspectionTools(dbg, languageService, codeLocationFactory).Create());
-			tools.AddRange(new MemoryTools(dbg).Create());
-			tools.AddRange(new ExceptionTools(dbg, exceptionService).Create());
-			tools.AddRange(new ModuleBreakpointTools(dbg, moduleBpService).Create());
-
-			var authToken = Environment.GetEnvironmentVariable("DNSPY_MCP_TOKEN");
-			var srv = new McpServer(GetPort(), tools, Log, authToken);
 			try {
+				Log("starting MCP server");
+				var dbg = new DbgAccess(dbgManager.Value);
+				var tools = new List<ToolDef>();
+				tools.AddRange(new DebugTools(dbg, attachService).Create());
+				tools.AddRange(new BreakpointTools(dbg, bpService, bpFactory, hitCountService, codeLocationFactory, moduleIdProvider, documentService).Create());
+				tools.AddRange(new InspectionTools(dbg, languageService, codeLocationFactory).Create());
+				tools.AddRange(new MemoryTools(dbg).Create());
+				tools.AddRange(new ExceptionTools(dbg, exceptionService).Create());
+				tools.AddRange(new ModuleBreakpointTools(dbg, moduleBpService).Create());
+
+				var authToken = Environment.GetEnvironmentVariable("DNSPY_MCP_TOKEN");
+				var srv = new McpServer(GetPort(), tools, Log, authToken);
 				srv.Start();
 				server = srv;
 				// Push a notification to SSE clients whenever a process pauses (breakpoint/step/break).
@@ -102,8 +103,9 @@ namespace dnSpy.MCP {
 				pausedManager = mgr;
 			}
 			catch (Exception ex) {
-				// ponytail: port in use / listener denied — log and stay off; the extension is still loaded.
-				Log($"failed to start MCP server: {ex.Message}");
+				// Port in use / listener denied / a debugger service failed to compose — log and stay off;
+				// the extension itself is still loaded.
+				Log("failed to start MCP server: " + ex);
 			}
 		}
 
@@ -135,6 +137,14 @@ namespace dnSpy.MCP {
 			return DefaultPort;
 		}
 
-		static void Log(string message) => Debug.WriteLine("[dnSpy.MCP] " + message);
+		static void Log(string message) {
+			Debug.WriteLine("[dnSpy.MCP] " + message);
+			// Also append to a log file so the server's status is observable without a debugger attached.
+			try {
+				var path = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "dnSpy.MCP.log");
+				System.IO.File.AppendAllText(path, DateTime.Now.ToString("HH:mm:ss") + " " + message + Environment.NewLine);
+			}
+			catch { }
+		}
 	}
 }
