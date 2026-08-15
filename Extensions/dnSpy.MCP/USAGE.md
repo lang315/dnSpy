@@ -276,6 +276,10 @@ Rồi trỏ MCP client tới `http://127.0.0.1:27115/mcp`. Guard Host cho qua v�
 
 > **Wine/CrossOver:** dnSpy có `WineFixes.cs` nên giao diện chạy được trên Wine, nhưng debug engine CorDebug cần API Windows thật — Wine không cung cấp đủ, nên tính năng debug không đáng tin. Khuyến nghị dùng máy ảo Windows thật.
 
+> **Lưu ý Windows ARM64 (Parallels trên Apple Silicon):** đã kiểm thực tế — server, 32 tool, `bp_add_method` (bind + hit), `dbg_attach`, break/wait, threads/modules/callstack chạy đúng. Nhưng `dbg_start` (CorDebug **launch**) không tạo được process, và `dbg_locals`/`dbg_eval`/`dbg_set_variable` trả "Internal debugger error" — đây là giới hạn func-eval/launch của CorDebug trên ARM64, không phải lỗi extension. Trên ARM64 hãy **attach** vào tiến trình đang chạy thay vì launch. Để dùng đầy đủ (launch + eval), chạy Windows **x64** (RID chính thức của dnSpy là win-x86/win-x64).
+>
+> Khi cài SDK vào thư mục riêng (vd `C:\dotnet10`), đặt `DOTNET_ROOT` trỏ tới đó để dnSpy.exe (apphost) tìm được .NET Desktop runtime; và dành cổng cho HttpListener nếu chạy non-admin: `netsh http add urlacl url=http://127.0.0.1:27115/ user=Everyone`.
+
 ---
 
 ## 10. Khắc phục sự cố
