@@ -12,7 +12,13 @@ Extension đã mở rộng từ 18 → **32 tool**, build sạch net48 + net10.0
 - **P1 xong hết** — `dbg_read_memory`/`dbg_write_memory` (4), `dbg_expand` (5), `dbg_set_variable` (6), `dbg_variables` autos/returns/statics/exceptions (7), `dbg_set_next_statement` (8), `exc_break` (9), `bp_add` hit-count (10), `mbp_*` module breakpoints (11), `dbg_set_thread` (12), `dbg_list_attachable` (13).
 - **P2 phần lớn xong** — SSE `notifications/paused` push (14), tool annotations readOnly/destructive (15), echo protocolVersion (20).
 - **P2 chưa làm (quyết định có chủ đích):** structured content/outputSchema (16 — trả JSON-text vẫn đủ), log vào Output window (17 — giữ `Debug.WriteLine`, tránh phụ thuộc UI-thread), UI trạng thái server (18), test project trong repo (19 — repo không có convention test; smoke test giữ ở scratchpad làm evidence).
-- **P0#1 còn lại:** verify runtime trên Windows — cần chạy dnSpy thật trong VM (xem `USAGE.md` mục 9, hướng dẫn Parallels).
+- **P0#1 verified runtime** (Parallels Windows 11 ARM64 VM, dnSpy chạy thật):
+  - ✅ Server + 32 tool + protocol (initialize/tools/list/tools/call) + args + annotations + echo version.
+  - ✅ `bp_add_method` resolve tên→token đúng (`Program.Add` → 0x06000001), **bind + hit** thật (boundCount=1, hitCount=1).
+  - ✅ `dbg_attach` → `dbg_break` → `dbg_wait_for_break` → `dbg_threads` / `dbg_modules` / `dbg_callstack` (formatter đúng: `dbgtest.dll!int Program.Add(int a, int b)`).
+  - ⚠️ `dbg_locals` / `dbg_eval` / `dbg_set_variable` trả "Internal debugger error" — **func-eval của CorDebug trên ARM64**, không phải lỗi MCP (context tạo được, callstack/format chạy; chỉ func-eval fail). Kỳ vọng chạy đúng trên x64.
+  - ❌ `dbg_start` (CorDebug **launch**) không spawn process trên ARM64 (engine nhận, isDebugging=true, nhưng process không tạo). Attach là đường thay thế trên ARM64. Kỳ vọng chạy đúng trên x64.
+  - Kết luận: code MCP đúng; hạn chế còn lại là CorDebug native trên Windows ARM64. Nên verify lại trên Windows x64 (nền tảng chính dnSpy hỗ trợ: RID win-x86/win-x64).
 
 ---
 
