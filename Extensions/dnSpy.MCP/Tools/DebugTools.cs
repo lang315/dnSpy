@@ -22,6 +22,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
+using System.Text.RegularExpressions;
 using System.Threading;
 using dnSpy.Contracts.Debugger;
 using dnSpy.Contracts.Debugger.Attach;
@@ -132,6 +133,15 @@ namespace dnSpy.MCP.Tools {
 			var path = (string?)args["path"] ?? throw new ArgumentException("'path' is required");
 			if (!File.Exists(path))
 				throw new FileNotFoundException($"file not found: {path}");
+			// An apphost .exe re-execs the .NET host, which drops breakpoints armed before launch; debugging
+			// the sibling .dll directly (the `dotnet exec` target) lets pre-set breakpoints bind on module load.
+			if (string.Equals(Path.GetExtension(path), ".exe", StringComparison.OrdinalIgnoreCase)) {
+				var dir = Path.GetDirectoryName(Path.GetFullPath(path))!;
+				var baseName = Path.GetFileNameWithoutExtension(path);
+				var dll = Path.Combine(dir, baseName + ".dll");
+				if (File.Exists(dll) && File.Exists(Path.Combine(dir, baseName + ".runtimeconfig.json")))
+					path = dll;
+			}
 			var cmdLine = (string?)args["args"];
 			var workingDir = (string?)args["working_dir"] ?? Path.GetDirectoryName(Path.GetFullPath(path));
 			var breakAtEntry = (bool?)args["break_at_entry"] ?? false;
@@ -159,10 +169,27 @@ namespace dnSpy.MCP.Tools {
 			return string.Equals(Path.GetExtension(path), ".dll", StringComparison.OrdinalIgnoreCase);
 		}
 
+		// dnSpy's attachable-process enumeration throws an AV when given a name filter (it inspects every
+		// process's modules); fetch the full list unfiltered — that path is safe — and match name/pid ourselves.
+		AttachableProcess[] GetAttachable(string? name, int? pid) {
+			var all = attachService.Value.GetAttachableProcessesAsync(
+				null, null, null, CancellationToken.None).GetAwaiter().GetResult();
+			IEnumerable<AttachableProcess> q = all;
+			if (pid is not null)
+				q = q.Where(p => p.ProcessId == pid.Value);
+			if (name is not null)
+				q = q.Where(p => WildcardMatch(p.Name, name));
+			return q.ToArray();
+		}
+
+		static bool WildcardMatch(string text, string pattern) {
+			var regex = "^" + Regex.Escape(pattern).Replace("\\*", ".*").Replace("\\?", ".") + "$";
+			return Regex.IsMatch(text, regex, RegexOptions.IgnoreCase);
+		}
+
 		string ListAttachable(JObject args) {
 			var name = (string?)args["name"];
-			var processes = attachService.Value.GetAttachableProcessesAsync(
-				name is null ? null : new[] { name }, null, null, CancellationToken.None).GetAwaiter().GetResult();
+			var processes = GetAttachable(name, null);
 			var arr = new JArray(processes.Select(p => (object)new JObject {
 				["pid"] = p.ProcessId,
 				["name"] = p.Name,
@@ -192,10 +219,7 @@ namespace dnSpy.MCP.Tools {
 			if (pid is null && name is null)
 				throw new ArgumentException("provide 'pid' or 'name'");
 
-			var processes = attachService.Value.GetAttachableProcessesAsync(
-				name is null ? null : new[] { name },
-				pid is null ? null : new[] { pid.Value },
-				null, CancellationToken.None).GetAwaiter().GetResult();
+			var processes = GetAttachable(name, pid);
 			if (processes.Length == 0)
 				throw new InvalidOperationException("no matching attachable process found");
 			var target = processes[0];

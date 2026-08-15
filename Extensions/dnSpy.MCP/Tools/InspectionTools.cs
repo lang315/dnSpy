@@ -339,7 +339,9 @@ namespace dnSpy.MCP.Tools {
 					throw new InvalidOperationException("thread's process is not paused");
 				var frame = thread.GetTopStackFrame()
 					?? throw new InvalidOperationException("no current stack frame");
-				if (frame.Location is not DbgDotNetCodeLocation loc)
+				// A JIT-compiled frame reports a native location (DbgDotNetNativeCodeLocation); both it and the
+				// IL location implement IDbgDotNetCodeLocation, so match the interface, not the concrete class.
+				if (frame.Location is not IDbgDotNetCodeLocation loc)
 					throw new InvalidOperationException("current frame has no .NET code location");
 				var newLoc = codeLocationFactory.Value.Create(loc.Module, loc.Token, offset);
 				// We own newLoc; let the runtime close it on the next continue (SetIP doesn't take ownership).
