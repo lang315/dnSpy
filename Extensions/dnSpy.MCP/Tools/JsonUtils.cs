@@ -17,15 +17,54 @@
     along with dnSpy.  If not, see <http://www.gnu.org/licenses/>.
 */
 
+using System;
+using System.Globalization;
 using System.Linq;
 using dnSpy.Contracts.Debugger;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 
 namespace dnSpy.MCP.Tools {
-	/// <summary>Serialization helpers shared by the tool handlers.</summary>
+	/// <summary>Serialization + parsing helpers shared by the tool handlers.</summary>
 	static class JsonUtils {
 		public static string Json(JToken token) => token.ToString(Formatting.Indented);
+
+		// net48 has no Math.Clamp.
+		public static int Clamp(int value, int min, int max) => value < min ? min : value > max ? max : value;
+
+		public static uint ParseUInt(string? text, string field) => (uint)ParseNumber(text, field, uint.MaxValue);
+
+		public static ulong ParseULong(string? text, string field) {
+			if (text is null)
+				throw new ArgumentException($"'{field}' is required");
+			text = text.Trim();
+			var isHex = text.StartsWith("0x", StringComparison.OrdinalIgnoreCase);
+			var span = isHex ? text.Substring(2) : text;
+			if (ulong.TryParse(span, isHex ? NumberStyles.HexNumber : NumberStyles.Integer, CultureInfo.InvariantCulture, out var value))
+				return value;
+			throw new ArgumentException($"'{field}' is not a valid number: {text}");
+		}
+
+		static ulong ParseNumber(string? text, string field, ulong max) {
+			var value = ParseULong(text, field);
+			if (value > max)
+				throw new ArgumentException($"'{field}' is out of range: {text}");
+			return value;
+		}
+
+		public static byte[] ParseHexBytes(string? text, string field) {
+			if (text is null)
+				throw new ArgumentException($"'{field}' is required");
+			var clean = text.Replace("0x", "").Replace("0X", "").Replace(" ", "").Replace("-", "").Replace(",", "");
+			if (clean.Length % 2 != 0)
+				throw new ArgumentException($"'{field}' must have an even number of hex digits");
+			var bytes = new byte[clean.Length / 2];
+			for (int i = 0; i < bytes.Length; i++) {
+				if (!byte.TryParse(clean.Substring(i * 2, 2), NumberStyles.HexNumber, CultureInfo.InvariantCulture, out bytes[i]))
+					throw new ArgumentException($"'{field}' contains invalid hex");
+			}
+			return bytes;
+		}
 
 		public static JObject Process(DbgProcess p) => new JObject {
 			["id"] = p.Id,

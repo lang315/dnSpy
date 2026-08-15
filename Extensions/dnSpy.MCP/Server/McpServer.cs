@@ -18,6 +18,7 @@
 */
 
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
 using System.Net;
@@ -37,17 +38,33 @@ namespace dnSpy.MCP.Server {
 	/// only. Implements just the methods an MCP tool client needs: initialize, tools/list, tools/call.
 	/// </summary>
 	sealed class McpServer {
-		const string ProtocolVersion = "2024-11-05";
+		const string DefaultProtocolVersion = "2024-11-05";
 		const string ServerName = "dnSpy";
 		const string McpPath = "/mcp";
 		const long MaxBodyBytes = 4 * 1024 * 1024;
+
+		static readonly string[] SupportedProtocolVersions = { "2025-06-18", "2025-03-26", "2024-11-05" };
+
+		// Tools that only read state (safe to call freely) vs. tools that change program/debugger state.
+		static readonly HashSet<string> ReadOnlyTools = new(StringComparer.Ordinal) {
+			"dbg_status", "dbg_threads", "dbg_modules", "dbg_callstack", "dbg_locals",
+			"dbg_read_memory", "bp_list", "mbp_list", "dbg_list_attachable", "dbg_wait_for_break",
+		};
+		static readonly HashSet<string> DestructiveTools = new(StringComparer.Ordinal) {
+			"dbg_start", "dbg_stop", "dbg_restart", "dbg_write_memory", "dbg_set_variable", "dbg_set_next_statement",
+		};
 
 		readonly HttpListener listener;
 		readonly IReadOnlyDictionary<string, ToolDef> tools;
 		readonly IReadOnlyList<ToolDef> toolList;
 		readonly Action<string> log;
 		readonly string? authToken;
+		readonly ConcurrentDictionary<Guid, HttpListenerResponse> sseClients = new();
+		readonly ConcurrentQueue<byte[]> outbound = new();
+		readonly AutoResetEvent outboundSignal = new(false);
 		Thread? acceptThread;
+		Thread? senderThread;
+		Thread? heartbeatThread;
 		volatile bool running;
 
 		public int Port { get; }
@@ -71,13 +88,82 @@ namespace dnSpy.MCP.Server {
 			running = true;
 			acceptThread = new Thread(AcceptLoop) { IsBackground = true, Name = "dnSpy.MCP" };
 			acceptThread.Start();
+			senderThread = new Thread(SenderLoop) { IsBackground = true, Name = "dnSpy.MCP.tx" };
+			senderThread.Start();
+			heartbeatThread = new Thread(HeartbeatLoop) { IsBackground = true, Name = "dnSpy.MCP.hb" };
+			heartbeatThread.Start();
 			log($"MCP server listening on http://127.0.0.1:{Port}/mcp ({toolList.Count} tools)");
 		}
 
 		public void Stop() {
 			running = false;
+			outboundSignal.Set();
+			foreach (var kv in sseClients) {
+				try { kv.Value.Close(); } catch { }
+			}
+			sseClients.Clear();
 			try { listener.Stop(); } catch { }
 			try { listener.Close(); } catch { }
+		}
+
+		/// <summary>
+		/// Push a JSON-RPC notification to every connected SSE client (e.g. a breakpoint hit).
+		/// Only enqueues — the actual socket writes happen on the sender thread, so callers on the
+		/// debug-engine dispatcher thread are never blocked by a stalled client.
+		/// </summary>
+		public void Broadcast(string method, JObject @params) {
+			if (sseClients.IsEmpty)
+				return;
+			var msg = new JObject { ["jsonrpc"] = "2.0", ["method"] = method, ["params"] = @params }.ToString(Formatting.None);
+			outbound.Enqueue(Encoding.UTF8.GetBytes($"event: message\ndata: {msg}\n\n"));
+			outboundSignal.Set();
+		}
+
+		// The only thread that writes to SSE sockets. A stalled client blocks this thread, not the
+		// debugger. Wakes on a new frame or every 15s to send a heartbeat.
+		void SenderLoop() {
+			while (running) {
+				outboundSignal.WaitOne(15000);
+				while (outbound.TryDequeue(out var frame))
+					SendToAll(frame);
+			}
+		}
+
+		void HeartbeatLoop() {
+			var ping = Encoding.UTF8.GetBytes(": ping\n\n");
+			while (running) {
+				Thread.Sleep(15000);
+				if (!sseClients.IsEmpty) {
+					outbound.Enqueue(ping);
+					outboundSignal.Set();
+				}
+			}
+		}
+
+		void SendToAll(byte[] frame) {
+			foreach (var kv in sseClients) {
+				if (!TryWriteSse(kv.Value, frame))
+					RemoveClient(kv.Key);
+			}
+		}
+
+		void RemoveClient(Guid id) {
+			if (sseClients.TryRemove(id, out var res)) {
+				try { res.Close(); } catch { }
+			}
+		}
+
+		static bool TryWriteSse(HttpListenerResponse res, byte[] frame) {
+			try {
+				lock (res) {
+					res.OutputStream.Write(frame, 0, frame.Length);
+					res.OutputStream.Flush();
+				}
+				return true;
+			}
+			catch (Exception) {
+				return false;
+			}
 		}
 
 		void AcceptLoop() {
@@ -122,7 +208,16 @@ namespace dnSpy.MCP.Server {
 			}
 
 			if (req.HttpMethod == "GET") {
-				// No SSE stream in v1; a GET is only used for liveness checks.
+				var accept = req.Headers["Accept"] ?? "";
+				if (accept.Contains("text/event-stream")) {
+					if (req.Url?.AbsolutePath != McpPath) {
+						WriteText(ctx, 404, "text/plain", "not found");
+						return;
+					}
+					OpenSseStream(ctx);
+					return;
+				}
+				// Plain GET = liveness check.
 				WriteText(ctx, 200, "text/plain", "dnSpy MCP server");
 				return;
 			}
@@ -175,7 +270,7 @@ namespace dnSpy.MCP.Server {
 			try {
 				switch (method) {
 				case "initialize":
-					return JsonRpc.Result(id, Initialize());
+					return JsonRpc.Result(id, Initialize(@params));
 				case "ping":
 					return JsonRpc.Result(id, new JObject());
 				case "tools/list":
@@ -191,27 +286,46 @@ namespace dnSpy.MCP.Server {
 			}
 		}
 
-		JObject Initialize() => new JObject {
-			["protocolVersion"] = ProtocolVersion,
-			["capabilities"] = new JObject {
-				["tools"] = new JObject(),
-			},
-			["serverInfo"] = new JObject {
-				["name"] = ServerName,
-				["version"] = "1.0.0",
-			},
-		};
+		JObject Initialize(JObject @params) {
+			// Echo the client's requested protocol version if we support it, else our default.
+			var requested = (string?)@params["protocolVersion"];
+			var version = requested is not null && Array.IndexOf(SupportedProtocolVersions, requested) >= 0
+				? requested
+				: DefaultProtocolVersion;
+			return new JObject {
+				["protocolVersion"] = version,
+				["capabilities"] = new JObject {
+					["tools"] = new JObject(),
+				},
+				["serverInfo"] = new JObject {
+					["name"] = ServerName,
+					["version"] = "1.0.0",
+				},
+			};
+		}
 
 		JObject ListTools() {
 			var arr = new JArray();
 			foreach (var t in toolList) {
-				arr.Add(new JObject {
+				var tool = new JObject {
 					["name"] = t.Name,
 					["description"] = t.Description,
 					["inputSchema"] = t.InputSchema,
-				});
+				};
+				var annotations = Annotations(t.Name);
+				if (annotations is not null)
+					tool["annotations"] = annotations;
+				arr.Add(tool);
 			}
 			return new JObject { ["tools"] = arr };
+		}
+
+		static JObject? Annotations(string name) {
+			if (ReadOnlyTools.Contains(name))
+				return new JObject { ["readOnlyHint"] = true };
+			if (DestructiveTools.Contains(name))
+				return new JObject { ["destructiveHint"] = true };
+			return null;
 		}
 
 		JObject CallTool(JToken id, JObject @params) {
@@ -227,6 +341,19 @@ namespace dnSpy.MCP.Server {
 			catch (Exception ex) {
 				return JsonRpc.Result(id, ToolContent(ex.Message, isError: true));
 			}
+		}
+
+		void OpenSseStream(HttpListenerContext ctx) {
+			var res = ctx.Response;
+			res.StatusCode = 200;
+			res.ContentType = "text/event-stream; charset=utf-8";
+			res.Headers["Cache-Control"] = "no-cache";
+			res.KeepAlive = true;
+			res.SendChunked = true;
+			var id = Guid.NewGuid();
+			sseClients[id] = res;
+			// Don't close: the stream stays open until the client disconnects (a write then fails and
+			// prunes it). Returning here frees the worker thread; Broadcast/heartbeat write to it later.
 		}
 
 		bool IsLoopbackHost(string? host) =>

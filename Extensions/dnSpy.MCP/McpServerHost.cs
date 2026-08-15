@@ -24,10 +24,16 @@ using System.Diagnostics;
 using dnSpy.Contracts.Debugger;
 using dnSpy.Contracts.Debugger.Attach;
 using dnSpy.Contracts.Debugger.Breakpoints.Code;
+using dnSpy.Contracts.Debugger.Breakpoints.Modules;
 using dnSpy.Contracts.Debugger.DotNet.Breakpoints.Code;
+using dnSpy.Contracts.Debugger.DotNet.Code;
 using dnSpy.Contracts.Debugger.Evaluation;
+using dnSpy.Contracts.Debugger.Exceptions;
+using dnSpy.Contracts.Documents;
+using dnSpy.Contracts.Metadata;
 using dnSpy.MCP.Server;
 using dnSpy.MCP.Tools;
+using Newtonsoft.Json.Linq;
 
 namespace dnSpy.MCP {
 	/// <summary>
@@ -44,19 +50,32 @@ namespace dnSpy.MCP {
 		readonly Lazy<DbgDotNetBreakpointFactory> bpFactory;
 		readonly Lazy<DbgCodeBreakpointHitCountService> hitCountService;
 		readonly Lazy<DbgLanguageService> languageService;
+		readonly Lazy<DbgDotNetCodeLocationFactory> codeLocationFactory;
+		readonly Lazy<IModuleIdProvider> moduleIdProvider;
+		readonly Lazy<IDsDocumentService> documentService;
+		readonly Lazy<DbgExceptionSettingsService> exceptionService;
+		readonly Lazy<DbgModuleBreakpointsService> moduleBpService;
 
 		McpServer? server;
 
 		[ImportingConstructor]
 		McpServerHost(Lazy<DbgManager> dbgManager, Lazy<AttachableProcessesService> attachService,
 			Lazy<DbgCodeBreakpointsService> bpService, Lazy<DbgDotNetBreakpointFactory> bpFactory,
-			Lazy<DbgCodeBreakpointHitCountService> hitCountService, Lazy<DbgLanguageService> languageService) {
+			Lazy<DbgCodeBreakpointHitCountService> hitCountService, Lazy<DbgLanguageService> languageService,
+			Lazy<DbgDotNetCodeLocationFactory> codeLocationFactory, Lazy<IModuleIdProvider> moduleIdProvider,
+			Lazy<IDsDocumentService> documentService, Lazy<DbgExceptionSettingsService> exceptionService,
+			Lazy<DbgModuleBreakpointsService> moduleBpService) {
 			this.dbgManager = dbgManager;
 			this.attachService = attachService;
 			this.bpService = bpService;
 			this.bpFactory = bpFactory;
 			this.hitCountService = hitCountService;
 			this.languageService = languageService;
+			this.codeLocationFactory = codeLocationFactory;
+			this.moduleIdProvider = moduleIdProvider;
+			this.documentService = documentService;
+			this.exceptionService = exceptionService;
+			this.moduleBpService = moduleBpService;
 		}
 
 		public void Start() {
@@ -66,14 +85,21 @@ namespace dnSpy.MCP {
 			var dbg = new DbgAccess(dbgManager.Value);
 			var tools = new List<ToolDef>();
 			tools.AddRange(new DebugTools(dbg, attachService).Create());
-			tools.AddRange(new BreakpointTools(dbg, bpService, bpFactory, hitCountService).Create());
-			tools.AddRange(new InspectionTools(dbg, languageService).Create());
+			tools.AddRange(new BreakpointTools(dbg, bpService, bpFactory, hitCountService, codeLocationFactory, moduleIdProvider, documentService).Create());
+			tools.AddRange(new InspectionTools(dbg, languageService, codeLocationFactory).Create());
+			tools.AddRange(new MemoryTools(dbg).Create());
+			tools.AddRange(new ExceptionTools(dbg, exceptionService).Create());
+			tools.AddRange(new ModuleBreakpointTools(dbg, moduleBpService).Create());
 
 			var authToken = Environment.GetEnvironmentVariable("DNSPY_MCP_TOKEN");
 			var srv = new McpServer(GetPort(), tools, Log, authToken);
 			try {
 				srv.Start();
 				server = srv;
+				// Push a notification to SSE clients whenever a process pauses (breakpoint/step/break).
+				var mgr = dbgManager.Value;
+				mgr.ProcessPaused += OnProcessPaused;
+				pausedManager = mgr;
 			}
 			catch (Exception ex) {
 				// ponytail: port in use / listener denied — log and stay off; the extension is still loaded.
@@ -82,8 +108,24 @@ namespace dnSpy.MCP {
 		}
 
 		public void Stop() {
+			if (pausedManager is not null) {
+				pausedManager.ProcessPaused -= OnProcessPaused;
+				pausedManager = null;
+			}
 			server?.Stop();
 			server = null;
+		}
+
+		DbgManager? pausedManager;
+
+		void OnProcessPaused(object? sender, ProcessPausedEventArgs e) {
+			var srv = server;
+			if (srv is null)
+				return;
+			srv.Broadcast("notifications/paused", new JObject {
+				["pid"] = e.Process.Id,
+				["threadId"] = e.Thread is null ? null : (long)e.Thread.Id,
+			});
 		}
 
 		static int GetPort() {

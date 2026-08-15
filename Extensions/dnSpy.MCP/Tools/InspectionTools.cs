@@ -19,11 +19,12 @@
 
 using System;
 using System.Collections.Generic;
-using System.Globalization;
 using System.Linq;
 using System.Threading;
 using dnSpy.Contracts.Debugger;
 using dnSpy.Contracts.Debugger.CallStack;
+using dnSpy.Contracts.Debugger.Code;
+using dnSpy.Contracts.Debugger.DotNet.Code;
 using dnSpy.Contracts.Debugger.Evaluation;
 using dnSpy.Contracts.Debugger.Text;
 using dnSpy.MCP.Server;
@@ -44,10 +45,13 @@ namespace dnSpy.MCP.Tools {
 
 		readonly DbgAccess dbg;
 		readonly Lazy<DbgLanguageService> languageService;
+		readonly Lazy<DbgDotNetCodeLocationFactory> codeLocationFactory;
 
-		public InspectionTools(DbgAccess dbg, Lazy<DbgLanguageService> languageService) {
+		public InspectionTools(DbgAccess dbg, Lazy<DbgLanguageService> languageService,
+			Lazy<DbgDotNetCodeLocationFactory> codeLocationFactory) {
 			this.dbg = dbg;
 			this.languageService = languageService;
+			this.codeLocationFactory = codeLocationFactory;
 		}
 
 		DbgManager Mgr => dbg.DbgManager;
@@ -84,6 +88,39 @@ namespace dnSpy.MCP.Tools {
 					("frame_index", Schema.Int("Frame index, 0 = top (default 0)"), false),
 					("thread_id", Schema.Int("Native thread id; defaults to the current thread"), false)),
 				Eval);
+
+			yield return new ToolDef("dbg_expand",
+				"Evaluate an expression and list its immediate child members (fields/elements). Use to drill into objects and arrays.",
+				Schema.Object(
+					("expression", Schema.Str("Expression whose children to list"), true),
+					("frame_index", Schema.Int("Frame index, 0 = top (default 0)"), false),
+					("max_children", Schema.Int("Maximum children to return (default 100)"), false),
+					("thread_id", Schema.Int("Native thread id; defaults to the current thread"), false)),
+				Expand);
+
+			yield return new ToolDef("dbg_variables",
+				"List a category of variables on the paused thread: autos, returns (return values), statics (static fields), or exceptions.",
+				Schema.Object(
+					("kind", Schema.Str("autos | returns | statics | exceptions"), true),
+					("frame_index", Schema.Int("Frame index, 0 = top (default 0)"), false),
+					("thread_id", Schema.Int("Native thread id; defaults to the current thread"), false)),
+				Variables);
+
+			yield return new ToolDef("dbg_set_variable",
+				"Assign a new value to a variable/expression in a stack frame (C#/VB assignment).",
+				Schema.Object(
+					("target", Schema.Str("Left-hand side, e.g. 'this.count' or 'x'"), true),
+					("value", Schema.Str("Right-hand side expression"), true),
+					("frame_index", Schema.Int("Frame index, 0 = top (default 0)"), false),
+					("thread_id", Schema.Int("Native thread id; defaults to the current thread"), false)),
+				SetVariable);
+
+			yield return new ToolDef("dbg_set_next_statement",
+				"Move the instruction pointer of the paused top frame to a different IL offset in the same method.",
+				Schema.Object(
+					("il_offset", Schema.Str("Target IL offset, hex or decimal"), true),
+					("thread_id", Schema.Int("Native thread id; defaults to the current thread"), false)),
+				SetNextStatement);
 		}
 
 		string Threads() => dbg.Invoke(() => {
@@ -196,6 +233,122 @@ namespace dnSpy.MCP.Tools {
 				finally {
 					context.Close();
 				}
+			});
+		}
+
+		string Expand(JObject args) {
+			var expression = (string?)args["expression"] ?? throw new ArgumentException("'expression' is required");
+			var frameIndex = (int?)args["frame_index"] ?? 0;
+			var maxChildren = Clamp((int?)args["max_children"] ?? 100, 1, 1000);
+			var threadId = (ulong?)(long?)args["thread_id"];
+			return dbg.Invoke(() => {
+				var (frame, language) = ResolveFrame(threadId, frameIndex);
+				var context = language.CreateContext(frame, cancellationToken: CancellationToken.None);
+				try {
+					var evalInfo = new DbgEvaluationInfo(context, frame, CancellationToken.None);
+					var ee = language.ExpressionEvaluator;
+					var res = language.ValueNodeFactory.Create(evalInfo, expression,
+						DbgValueNodeEvaluationOptions.None, DbgEvaluationOptions.Expression, ee.CreateExpressionEvaluatorState());
+					var node = res.ValueNode;
+					var writer = new DbgStringBuilderTextWriter();
+					var obj = new JObject {
+						["expression"] = expression,
+						["value"] = node.HasError ? node.ErrorMessage : FormatValue(node, evalInfo, writer),
+						["hasChildren"] = node.HasChildren == true,
+					};
+					if (node.HasChildren == true) {
+						var count = node.GetChildCount(evalInfo);
+						var take = (int)Math.Min((ulong)maxChildren, count);
+						var arr = new JArray();
+						foreach (var child in node.GetChildren(evalInfo, 0, take, DbgValueNodeEvaluationOptions.None)) {
+							arr.Add(new JObject {
+								["name"] = FormatName(child, evalInfo, writer),
+								["value"] = child.HasError ? child.ErrorMessage : FormatValue(child, evalInfo, writer),
+							});
+						}
+						obj["childCount"] = (long)count;
+						obj["children"] = arr;
+					}
+					return Json(obj);
+				}
+				finally {
+					context.Close();
+				}
+			});
+		}
+
+		string Variables(JObject args) {
+			var kind = ((string?)args["kind"] ?? throw new ArgumentException("'kind' is required")).ToLowerInvariant();
+			var frameIndex = (int?)args["frame_index"] ?? 0;
+			var threadId = (ulong?)(long?)args["thread_id"];
+			return dbg.Invoke(() => {
+				var (frame, language) = ResolveFrame(threadId, frameIndex);
+				var context = language.CreateContext(frame, cancellationToken: CancellationToken.None);
+				try {
+					var evalInfo = new DbgEvaluationInfo(context, frame, CancellationToken.None);
+					DbgValueNodeProvider provider = kind switch {
+						"autos" => language.AutosProvider,
+						"returns" => language.ReturnValuesProvider,
+						"statics" => language.StaticFieldsProvider,
+						"exceptions" => language.ExceptionsProvider,
+						_ => throw new ArgumentException("'kind' must be autos, returns, statics, or exceptions"),
+					};
+					var writer = new DbgStringBuilderTextWriter();
+					var arr = new JArray();
+					foreach (var node in provider.GetNodes(evalInfo, DbgValueNodeEvaluationOptions.None)) {
+						arr.Add(new JObject {
+							["name"] = FormatName(node, evalInfo, writer),
+							["value"] = node.HasError ? node.ErrorMessage : FormatValue(node, evalInfo, writer),
+						});
+					}
+					return Json(arr);
+				}
+				finally {
+					context.Close();
+				}
+			});
+		}
+
+		string SetVariable(JObject args) {
+			var target = (string?)args["target"] ?? throw new ArgumentException("'target' is required");
+			var value = (string?)args["value"] ?? throw new ArgumentException("'value' is required");
+			var frameIndex = (int?)args["frame_index"] ?? 0;
+			var threadId = (ulong?)(long?)args["thread_id"];
+			return dbg.Invoke(() => {
+				var (frame, language) = ResolveFrame(threadId, frameIndex);
+				var context = language.CreateContext(frame, cancellationToken: CancellationToken.None);
+				try {
+					var evalInfo = new DbgEvaluationInfo(context, frame, CancellationToken.None);
+					var result = language.ExpressionEvaluator.Assign(evalInfo, target, value, DbgEvaluationOptions.Expression);
+					if (result.Error is not null)
+						throw new InvalidOperationException(result.Error);
+					return $"{target} = {value}";
+				}
+				finally {
+					context.Close();
+				}
+			});
+		}
+
+		string SetNextStatement(JObject args) {
+			var offset = ParseUInt((string?)args["il_offset"], "il_offset");
+			var threadId = (ulong?)(long?)args["thread_id"];
+			return dbg.Invoke(() => {
+				var thread = ResolveThread(threadId);
+				if (thread.Process.State != DbgProcessState.Paused)
+					throw new InvalidOperationException("thread's process is not paused");
+				var frame = thread.GetTopStackFrame()
+					?? throw new InvalidOperationException("no current stack frame");
+				if (frame.Location is not DbgDotNetCodeLocation loc)
+					throw new InvalidOperationException("current frame has no .NET code location");
+				var newLoc = codeLocationFactory.Value.Create(loc.Module, loc.Token, offset);
+				// We own newLoc; let the runtime close it on the next continue (SetIP doesn't take ownership).
+				thread.Runtime.CloseOnContinue(newLoc);
+				if (!thread.CanSetIP(newLoc))
+					throw new InvalidOperationException("cannot set next statement to that IL offset");
+				thread.SetIP(newLoc);
+				// SetIP is dispatched asynchronously; CanSetIP passed, but the move completes shortly after.
+				return $"requested move of instruction pointer to IL offset 0x{offset:X}";
 			});
 		}
 
