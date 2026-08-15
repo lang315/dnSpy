@@ -88,7 +88,7 @@ namespace dnSpy.MCP.Tools {
 			yield return new ToolDef("bp_list",
 				"List all code breakpoints with their id, location, enabled state, and live hit count.",
 				Schema.Object(),
-				_ => List());
+				_ => List(), readOnly: true);
 
 			yield return new ToolDef("bp_remove",
 				"Remove a breakpoint by id, or all breakpoints.",
@@ -115,9 +115,7 @@ namespace dnSpy.MCP.Tools {
 
 			return dbg.Invoke(() => {
 				var moduleId = ModuleId.Create(module);
-				var settings = new DbgCodeBreakpointSettings { IsEnabled = enabled };
-				if (!string.IsNullOrEmpty(condition))
-					settings.Condition = new DbgCodeBreakpointCondition(DbgCodeBreakpointConditionKind.IsTrue, condition!);
+				var settings = MakeSettings(enabled, condition);
 				if (hitCount is { } hc && hc > 0)
 					settings.HitCount = new DbgCodeBreakpointHitCount(DbgCodeBreakpointHitCountKind.GreaterThanOrEquals, hc);
 				var bp = bpFactory.Value.Create(moduleId, token, offset, settings);

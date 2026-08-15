@@ -47,7 +47,7 @@ namespace dnSpy.MCP.Tools {
 			yield return new ToolDef("mbp_list",
 				"List module-load breakpoints.",
 				Schema.Object(),
-				_ => List());
+				_ => List(), readOnly: true);
 
 			yield return new ToolDef("mbp_remove",
 				"Remove a module-load breakpoint by id, or all of them.",

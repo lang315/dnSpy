@@ -49,7 +49,7 @@ namespace dnSpy.MCP.Tools {
 			yield return new ToolDef("dbg_status",
 				"Get the current debug session status: whether debugging, running/paused, and the list of debugged processes.",
 				Schema.Object(),
-				_ => Status());
+				_ => Status(), readOnly: true);
 
 			yield return new ToolDef("dbg_start",
 				"Start debugging a .NET executable. Picks .NET (Core/5+) vs .NET Framework automatically; self-contained single-file exes are ambiguous, so pass 'runtime' to force the choice.",
@@ -59,13 +59,13 @@ namespace dnSpy.MCP.Tools {
 					("working_dir", Schema.Str("Working directory (defaults to the program's directory)"), false),
 					("break_at_entry", Schema.Bool("Break at the entry point (default false)"), false),
 					("runtime", Schema.Str("Force runtime: 'net' (Core/5+) or 'netfx' (Framework)"), false)),
-				Start);
+				Start, destructive: true);
 
 			yield return new ToolDef("dbg_list_attachable",
 				"List running .NET processes that can be attached to.",
 				Schema.Object(
 					("name", Schema.Str("Filter by process name (wildcards * and ? allowed)"), false)),
-				ListAttachable);
+				ListAttachable, readOnly: true);
 
 			yield return new ToolDef("dbg_attach",
 				"Attach the debugger to a running .NET process by pid or process name.",
@@ -93,7 +93,7 @@ namespace dnSpy.MCP.Tools {
 			yield return new ToolDef("dbg_stop",
 				"Stop debugging: terminate all debugged processes.",
 				Schema.Object(),
-				_ => { Mgr.StopDebuggingAll(); return "stop requested"; });
+				_ => { Mgr.StopDebuggingAll(); return "stop requested"; }, destructive: true);
 
 			yield return new ToolDef("dbg_restart",
 				"Restart the current debug session.",
@@ -103,7 +103,7 @@ namespace dnSpy.MCP.Tools {
 						throw new InvalidOperationException("cannot restart the current session");
 					Mgr.Restart();
 					return "restart requested";
-				});
+				}, destructive: true);
 
 			yield return new ToolDef("dbg_step",
 				"Step the paused thread and wait for the step to complete. kind = into | over | out.",
@@ -116,7 +116,7 @@ namespace dnSpy.MCP.Tools {
 				"Block until a debugged process pauses (breakpoint hit, step done, or break), or until timeout.",
 				Schema.Object(
 					("timeout_ms", Schema.Int("Max time to wait in ms (default 30000)"), false)),
-				WaitForBreak);
+				WaitForBreak, readOnly: true);
 		}
 
 		string Status() => dbg.Invoke(() => {
@@ -136,10 +136,8 @@ namespace dnSpy.MCP.Tools {
 			// An apphost .exe re-execs the .NET host, which drops breakpoints armed before launch; debugging
 			// the sibling .dll directly (the `dotnet exec` target) lets pre-set breakpoints bind on module load.
 			if (string.Equals(Path.GetExtension(path), ".exe", StringComparison.OrdinalIgnoreCase)) {
-				var dir = Path.GetDirectoryName(Path.GetFullPath(path))!;
-				var baseName = Path.GetFileNameWithoutExtension(path);
-				var dll = Path.Combine(dir, baseName + ".dll");
-				if (File.Exists(dll) && File.Exists(Path.Combine(dir, baseName + ".runtimeconfig.json")))
+				var dll = SiblingPath(path, ".dll");
+				if (File.Exists(dll) && File.Exists(SiblingPath(path, ".runtimeconfig.json")))
 					path = dll;
 			}
 			var cmdLine = (string?)args["args"];
@@ -163,11 +161,14 @@ namespace dnSpy.MCP.Tools {
 			if (string.Equals(runtime, "netfx", StringComparison.OrdinalIgnoreCase))
 				return false;
 			// Heuristic: a .runtimeconfig.json next to the file means .NET Core/5+; a bare .dll needs the host too.
-			var baseName = Path.Combine(Path.GetDirectoryName(Path.GetFullPath(path))!, Path.GetFileNameWithoutExtension(path));
-			if (File.Exists(baseName + ".runtimeconfig.json"))
+			if (File.Exists(SiblingPath(path, ".runtimeconfig.json")))
 				return true;
 			return string.Equals(Path.GetExtension(path), ".dll", StringComparison.OrdinalIgnoreCase);
 		}
+
+		// The file next to <paramref name="path"/> with the same base name and the given extension.
+		static string SiblingPath(string path, string extension) =>
+			Path.Combine(Path.GetDirectoryName(Path.GetFullPath(path))!, Path.GetFileNameWithoutExtension(path) + extension);
 
 		// dnSpy's attachable-process enumeration throws an AV when given a name filter (it inspects every
 		// process's modules); fetch the full list unfiltered — that path is safe — and match name/pid ourselves.
@@ -177,15 +178,15 @@ namespace dnSpy.MCP.Tools {
 			IEnumerable<AttachableProcess> q = all;
 			if (pid is not null)
 				q = q.Where(p => p.ProcessId == pid.Value);
-			if (name is not null)
-				q = q.Where(p => WildcardMatch(p.Name, name));
+			if (name is not null) {
+				var rx = WildcardRegex(name);
+				q = q.Where(p => rx.IsMatch(p.Name));
+			}
 			return q.ToArray();
 		}
 
-		static bool WildcardMatch(string text, string pattern) {
-			var regex = "^" + Regex.Escape(pattern).Replace("\\*", ".*").Replace("\\?", ".") + "$";
-			return Regex.IsMatch(text, regex, RegexOptions.IgnoreCase);
-		}
+		static Regex WildcardRegex(string pattern) =>
+			new Regex("^" + Regex.Escape(pattern).Replace("\\*", ".*").Replace("\\?", ".") + "$", RegexOptions.IgnoreCase);
 
 		string ListAttachable(JObject args) {
 			var name = (string?)args["name"];

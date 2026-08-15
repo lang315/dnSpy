@@ -43,7 +43,7 @@ namespace dnSpy.MCP.Tools {
 					("address", Schema.Str("Start address, hex (0x...) or decimal"), true),
 					("size", Schema.Int("Number of bytes to read (max 65536)"), true),
 					("pid", Schema.Int("Process id; defaults to the current process"), false)),
-				ReadMemory);
+				ReadMemory, readOnly: true);
 
 			yield return new ToolDef("dbg_write_memory",
 				"Write raw bytes (given as hex) into the debuggee's memory.",
@@ -51,7 +51,7 @@ namespace dnSpy.MCP.Tools {
 					("address", Schema.Str("Start address, hex or decimal"), true),
 					("bytes", Schema.Str("Hex bytes to write, e.g. '90 90' or '0x9090'"), true),
 					("pid", Schema.Int("Process id; defaults to the current process"), false)),
-				WriteMemory);
+				WriteMemory, destructive: true);
 		}
 
 		string ReadMemory(JObject args) {
