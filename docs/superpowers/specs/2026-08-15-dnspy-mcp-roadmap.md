@@ -20,6 +20,21 @@ Extension đã mở rộng từ 18 → **32 tool**, build sạch net48 + net10.0
   - ❌ `dbg_start` (CorDebug **launch**) không spawn process trên ARM64 (engine nhận, isDebugging=true, nhưng process không tạo). Attach là đường thay thế trên ARM64. Kỳ vọng chạy đúng trên x64.
   - Kết luận: code MCP đúng; hạn chế còn lại là CorDebug native trên Windows ARM64. Nên verify lại trên Windows x64 (nền tảng chính dnSpy hỗ trợ: RID win-x86/win-x64).
 
+## Cập nhật: verified runtime trên Windows x64 (2026-08-15)
+
+Chạy thật trên host Windows 10 22H2 **AMD64** (build `build.ps1 net -NoMsbuild`, dnSpy chạy qua scheduled task interactive, MCP server 32 tool). Xác nhận cả 2 giả thuyết ARM64 và sửa 3 bug mới.
+
+- ✅ **Các hạn chế ARM64 là ARM64-specific** (không phải bug extension):
+  - `dbg_start` LAUNCH: spawn process thật (dotnet.exe, bitness 64, Paused).
+  - `dbg_locals`/`dbg_eval`/`dbg_set_variable`: chạy đúng — locals ra giá trị thật (a=14,b=1,...); **func-eval gọi method** chạy: `a+b`=15, `a*10+b`=141, `System.Math.Max(a,b)`=14; `set_variable a=777` verify được.
+  - Attach path đầy đủ: attach → bp_add_method bind (token 0x06000001, boundCount=1) + hit (hitCount 1→2) → callstack `Program.Add`←`Main` → locals/eval/set_variable.
+- 🔧 **3 bug mới (x64, không phải ARM-specific) — đã sửa & retest xanh** (commit "Fix three debug tools found by Windows x64 runtime verification"):
+  1. `dbg_set_next_statement` báo "current frame has no .NET code location": frame đã JIT trả `DbgDotNetNativeCodeLocation` (không kế thừa `DbgDotNetCodeLocation`). Sửa: match interface `IDbgDotNetCodeLocation`. Verify: IP dời 0x5→0x0.
+  2. `dbg_start` bằng apphost `.exe`: apphost re-exec .NET host làm rớt breakpoint đặt trước khi launch (boundCount=0). Sửa: nếu có `.dll`+`.runtimeconfig.json` cạnh bên thì debug thẳng `.dll`. Verify: bp đặt trước dbg_start nay bind+hit khi launch.
+  3. `dbg_list_attachable`/`dbg_attach` theo tên: enumeration của dnSpy AV ("Invalid access to memory location") khi có name filter. Sửa: lấy list không filter (an toàn) rồi tự match name/pid. Verify: list+attach `dbgtest*` OK.
+- ⚠️ `dbg_variables kind=autos` trả `[{"name":"Error","value":"NYI"}]` — provider autos của dnSpy chưa implement (returns/statics/exceptions dùng cùng khuôn vẫn OK). Hạn chế dnSpy, không phải bug MCP.
+- Kết luận: **toàn bộ luồng debug lõi (launch/attach/breakpoint theo tên/step/callstack/locals/eval/func-eval/set_variable/set_next_statement) chạy thật trên Windows x64.**
+
 ---
 
 Trạng thái hiện tại: build sạch net48 + net10.0-windows, protocol/security smoke test pass, **chưa test runtime trên Windows**.

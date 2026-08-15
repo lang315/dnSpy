@@ -280,6 +280,11 @@ Rồi trỏ MCP client tới `http://127.0.0.1:27115/mcp`. Guard Host cho qua v�
 >
 > Khi cài SDK vào thư mục riêng (vd `C:\dotnet10`), đặt `DOTNET_ROOT` trỏ tới đó để dnSpy.exe (apphost) tìm được .NET Desktop runtime; và dành cổng cho HttpListener nếu chạy non-admin: `netsh http add urlacl url=http://127.0.0.1:27115/ user=Everyone`.
 
+> **Windows x64 — đã kiểm thực tế đầy đủ (2026-08-15):** trên Windows 10 x64, **toàn bộ luồng debug lõi chạy thật** — `dbg_start` (launch), `dbg_attach`, `bp_add_method` bind+hit, `dbg_step`, `dbg_callstack`, `dbg_locals`, `dbg_eval` (kể cả gọi method: `System.Math.Max(a,b)`), `dbg_set_variable`, `dbg_set_next_statement`. Các "Internal debugger error" thấy ở ARM64 **không xuất hiện** trên x64. Vài lưu ý dùng:
+> - `dbg_start` nhận cả `.exe` (apphost) lẫn `.dll`; nếu truyền apphost `.exe` có `.dll`+`.runtimeconfig.json` cạnh bên, tool tự debug thẳng `.dll` để breakpoint đặt trước khi launch bind được.
+> - Debuggee phải cùng bitness với dnSpy (dnSpy x64 ⇒ target x64).
+> - `dbg_variables kind=autos` trả `NYI` (provider autos của dnSpy chưa implement) — dùng `dbg_locals` hoặc `kind=statics/returns/exceptions`.
+
 ---
 
 ## 10. Khắc phục sự cố
