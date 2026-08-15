@@ -1,0 +1,98 @@
+/*
+    Copyright (C) 2014-2019 de4dot@gmail.com
+
+    This file is part of dnSpy
+
+    dnSpy is free software: you can redistribute it and/or modify
+    it under the terms of the GNU General Public License as published by
+    the Free Software Foundation, either version 3 of the License, or
+    (at your option) any later version.
+
+    dnSpy is distributed in the hope that it will be useful,
+    but WITHOUT ANY WARRANTY; without even the implied warranty of
+    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+    GNU General Public License for more details.
+
+    You should have received a copy of the GNU General Public License
+    along with dnSpy.  If not, see <http://www.gnu.org/licenses/>.
+*/
+
+using System;
+using System.Collections.Generic;
+using System.ComponentModel.Composition;
+using System.Diagnostics;
+using dnSpy.Contracts.Debugger;
+using dnSpy.Contracts.Debugger.Attach;
+using dnSpy.Contracts.Debugger.Breakpoints.Code;
+using dnSpy.Contracts.Debugger.DotNet.Breakpoints.Code;
+using dnSpy.Contracts.Debugger.Evaluation;
+using dnSpy.MCP.Server;
+using dnSpy.MCP.Tools;
+
+namespace dnSpy.MCP {
+	/// <summary>
+	/// Owns the MCP HTTP server lifetime. Started from an <c>[ExportAutoLoaded]</c> loader at app
+	/// startup and stopped when the app exits. Composes the debugger MEF services into the tool set.
+	/// </summary>
+	[Export]
+	sealed class McpServerHost {
+		const int DefaultPort = 27115;
+
+		readonly Lazy<DbgManager> dbgManager;
+		readonly Lazy<AttachableProcessesService> attachService;
+		readonly Lazy<DbgCodeBreakpointsService> bpService;
+		readonly Lazy<DbgDotNetBreakpointFactory> bpFactory;
+		readonly Lazy<DbgCodeBreakpointHitCountService> hitCountService;
+		readonly Lazy<DbgLanguageService> languageService;
+
+		McpServer? server;
+
+		[ImportingConstructor]
+		McpServerHost(Lazy<DbgManager> dbgManager, Lazy<AttachableProcessesService> attachService,
+			Lazy<DbgCodeBreakpointsService> bpService, Lazy<DbgDotNetBreakpointFactory> bpFactory,
+			Lazy<DbgCodeBreakpointHitCountService> hitCountService, Lazy<DbgLanguageService> languageService) {
+			this.dbgManager = dbgManager;
+			this.attachService = attachService;
+			this.bpService = bpService;
+			this.bpFactory = bpFactory;
+			this.hitCountService = hitCountService;
+			this.languageService = languageService;
+		}
+
+		public void Start() {
+			if (server is not null)
+				return;
+
+			var dbg = new DbgAccess(dbgManager.Value);
+			var tools = new List<ToolDef>();
+			tools.AddRange(new DebugTools(dbg, attachService).Create());
+			tools.AddRange(new BreakpointTools(dbg, bpService, bpFactory, hitCountService).Create());
+			tools.AddRange(new InspectionTools(dbg, languageService).Create());
+
+			var authToken = Environment.GetEnvironmentVariable("DNSPY_MCP_TOKEN");
+			var srv = new McpServer(GetPort(), tools, Log, authToken);
+			try {
+				srv.Start();
+				server = srv;
+			}
+			catch (Exception ex) {
+				// ponytail: port in use / listener denied — log and stay off; the extension is still loaded.
+				Log($"failed to start MCP server: {ex.Message}");
+			}
+		}
+
+		public void Stop() {
+			server?.Stop();
+			server = null;
+		}
+
+		static int GetPort() {
+			var env = Environment.GetEnvironmentVariable("DNSPY_MCP_PORT");
+			if (int.TryParse(env, out var port) && port > 0 && port <= 65535)
+				return port;
+			return DefaultPort;
+		}
+
+		static void Log(string message) => Debug.WriteLine("[dnSpy.MCP] " + message);
+	}
+}
