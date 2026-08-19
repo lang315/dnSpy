@@ -67,6 +67,39 @@ namespace dnSpy.MCP.IntegrationTests {
 			Assert.True(Dbg.WaitUntil(() => Dbg.IsRunning, 15000), "process never resumed");
 		}
 
+		// dbg_restart was the one session verb with no coverage, and "still debugging afterwards" is
+		// not evidence of anything: the untouched original session satisfies that too. A new pid is
+		// what distinguishes a real relaunch from a call that quietly did nothing.
+		[DbgFact]
+		public void Restarting_relaunches_the_process_and_rebinds_the_breakpoints() {
+			Dbg.Call("bp_add_method", new JObject {
+				["module"] = Dbg.FixtureDll(),
+				["method"] = "DbgTest.Program.Add",
+			});
+			Dbg.Call("dbg_start", new JObject { ["path"] = Dbg.FixtureDll() });
+			Dbg.WaitForBreak();
+			var firstPid = Assert.Single(Pids());
+
+			Dbg.Call("dbg_restart");
+
+			// Wait for the new process before waiting for a break. The old one is still paused at the
+			// moment restart is asked for, so dbg_wait_for_break would return immediately, describing
+			// the very session this test is trying to see replaced.
+			Assert.True(Dbg.WaitUntil(() => {
+				var pids = Pids();
+				return pids.Length > 0 && !pids.Contains(firstPid);
+			}, 30000), "the restart never produced a new process");
+
+			Dbg.WaitForBreak();
+			Assert.True(Dbg.IsDebugging);
+			// The breakpoints survive the relaunch and bind again into the fresh process.
+			Assert.Contains(Dbg.CallArray("bp_list"), b => Dbg.HitCount(b) >= 1);
+		}
+
+		/// <summary>Process ids of the current session, as dbg_status reports them.</summary>
+		static int[] Pids() =>
+			((JArray)Dbg.Status()["processes"]!).Select(p => (int)p["id"]!).ToArray();
+
 		// Regression: dnSpy's attachable-process enumeration faulted when given a name filter, so the
 		// tool fetches the unfiltered list and matches locally.
 		[DbgFact]
@@ -119,14 +152,27 @@ namespace dnSpy.MCP.IntegrationTests {
 			Assert.Contains("size", error, StringComparison.OrdinalIgnoreCase);
 		}
 
+		// Exception settings live in dnSpy, not in the debug session, so Dbg.Reset() does not undo them
+		// and an armed type stays armed for every later test in the run. The fixture throws on every
+		// loop pass, so leaving this on makes unrelated tests stop at that throw instead of their own
+		// breakpoint — which is exactly what happened once this test's leak met a fixture that throws
+		// often. Disarm in a finally; the assertion is not worth poisoning the rest of the suite.
 		[DbgFact]
 		public void Breaking_on_a_thrown_exception_can_be_enabled() {
-			var text = Dbg.Call("exc_break", new JObject {
-				["exception"] = "System.InvalidOperationException",
-				["enabled"] = true,
-			});
+			try {
+				var text = Dbg.Call("exc_break", new JObject {
+					["exception"] = "System.InvalidOperationException",
+					["enabled"] = true,
+				});
 
-			Assert.Contains("enabled", text, StringComparison.OrdinalIgnoreCase);
+				Assert.Contains("enabled", text, StringComparison.OrdinalIgnoreCase);
+			}
+			finally {
+				Dbg.TryCall("exc_break", new JObject {
+					["exception"] = "System.InvalidOperationException",
+					["enabled"] = false,
+				});
+			}
 		}
 	}
 }

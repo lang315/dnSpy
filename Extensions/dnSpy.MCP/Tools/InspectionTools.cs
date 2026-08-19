@@ -49,6 +49,14 @@ namespace dnSpy.MCP.Tools {
 		// cannot see. A machine consumer needs one stable representation.
 		const DbgValueFormatterOptions ValueOptions = DbgValueFormatterOptions.Decimal;
 
+		// Enumerating an object's members needs more than the default. With no options at all every
+		// child of a class instance comes back as "Internal debugger error" — arrays still expand,
+		// because their children are plain element accesses, which is what made the gap easy to miss.
+		const DbgValueNodeEvaluationOptions NodeOptions =
+			DbgValueNodeEvaluationOptions.PublicMembers |
+			DbgValueNodeEvaluationOptions.HideCompilerGeneratedMembers |
+			DbgValueNodeEvaluationOptions.RespectHideMemberAttributes;
+
 		const DbgStackFrameFormatterOptions FrameOptions =
 			DbgStackFrameFormatterOptions.ModuleNames |
 			DbgStackFrameFormatterOptions.ParameterTypes |
@@ -255,7 +263,7 @@ namespace dnSpy.MCP.Tools {
 			return WithFrame(args, (evalInfo, language) => {
 				var ee = language.ExpressionEvaluator;
 				var res = language.ValueNodeFactory.Create(evalInfo, expression,
-					DbgValueNodeEvaluationOptions.None, DbgEvaluationOptions.Expression, ee.CreateExpressionEvaluatorState());
+					NodeOptions, DbgEvaluationOptions.Expression, ee.CreateExpressionEvaluatorState());
 				var node = res.ValueNode;
 				var writer = new DbgStringBuilderTextWriter();
 				var obj = new JObject {
@@ -267,7 +275,7 @@ namespace dnSpy.MCP.Tools {
 					var count = node.GetChildCount(evalInfo);
 					var take = (int)Math.Min((ulong)maxChildren, count);
 					var arr = new JArray();
-					foreach (var child in node.GetChildren(evalInfo, 0, take, DbgValueNodeEvaluationOptions.None)) {
+					foreach (var child in node.GetChildren(evalInfo, 0, take, NodeOptions)) {
 						arr.Add(new JObject {
 							["name"] = FormatName(child, evalInfo, writer),
 							["value"] = child.HasError ? child.ErrorMessage : FormatValue(child, evalInfo, writer),

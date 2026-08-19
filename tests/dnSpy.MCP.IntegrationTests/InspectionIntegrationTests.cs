@@ -1,5 +1,6 @@
 using System;
 using System.Diagnostics;
+using System.IO;
 using System.Linq;
 using Newtonsoft.Json.Linq;
 using Xunit;
@@ -92,6 +93,82 @@ namespace dnSpy.MCP.IntegrationTests {
 			Assert.Contains(10, ((JArray)res["children"]!).Select(c => Dbg.Number(c["value"])));
 		}
 
+		// Program.Numbers is a flat int array, which only proves the tool can list children once. A
+		// reference graph is the case an agent actually meets, and it needs the expression it hands
+		// back to be usable as the next expression to expand.
+		[DbgFact]
+		public void Expanding_a_nested_object_walks_down_two_levels_of_the_graph() {
+			PauseInsideInspect();
+
+			var root = Dbg.CallJson("dbg_expand", new JObject { ["expression"] = "graph" });
+			Assert.True((bool?)root["hasChildren"]);
+			Assert.Contains("root", ChildValue(root, "Name"));
+			Assert.Equal(1, Dbg.Number(ChildValue(root, "Value")));
+			// The link the next expansion follows must be there and must not be null.
+			Assert.DoesNotContain("null", ChildValue(root, "Child"), StringComparison.OrdinalIgnoreCase);
+
+			var child = Dbg.CallJson("dbg_expand", new JObject { ["expression"] = "graph.Child" });
+			Assert.Contains("child", ChildValue(child, "Name"));
+			Assert.Equal(2, Dbg.Number(ChildValue(child, "Value")));
+
+			var leaf = Dbg.CallJson("dbg_expand", new JObject { ["expression"] = "graph.Child.Child" });
+			Assert.Contains("leaf", ChildValue(leaf, "Name"));
+			Assert.Equal(3, Dbg.Number(ChildValue(leaf, "Value")));
+		}
+
+		// Every other value assertion in this suite is an int, so a formatter that only ever produced
+		// numbers would pass all of them.
+		[DbgFact]
+		public void Non_numeric_locals_read_back_as_the_values_the_fixture_assigned() {
+			PauseInsideInspect();
+
+			// The formatter quotes and escapes strings, so assert on the content, not the spelling.
+			var text = Dbg.CallArray("dbg_locals").First(l => (string?)l["name"] == "text");
+			Assert.Contains("hello", (string?)text["value"] ?? "");
+
+			// An array and a collection format as a summary rather than their contents, so those are
+			// read back through the frame instead of parsed out of the summary text.
+			Assert.Equal(3, Dbg.Number(Eval("letters.Length")));
+			Assert.Contains("b", (string?)Eval("letters[1]") ?? "");
+
+			Assert.Equal(3, Dbg.Number(Eval("list.Count")));
+			Assert.Equal(7, Dbg.Number(Eval("list[0]")));
+			Assert.Equal(9, Dbg.Number(Eval("list[2]")));
+		}
+
+		// max_children exists to keep a huge object from flooding the caller; untested, a tool that
+		// ignored it would look identical on every object small enough to fit under the default.
+		[DbgFact]
+		public void Max_children_limits_how_many_children_are_returned() {
+			var res = Dbg.CallJson("dbg_expand", new JObject {
+				["expression"] = "DbgTest.Program.Numbers",
+				["max_children"] = 2,
+			});
+
+			Assert.Equal(2, ((JArray)res["children"]!).Count);
+			// The cap trims the returned list only; the caller still needs to see what it is missing.
+			Assert.Equal(5, (int?)res["childCount"]);
+		}
+
+		// Return values are the one dbg_variables kind with no coverage. dnSpy fills them in after a
+		// call completes under the debugger, but nothing in the engine promises it always will, so the
+		// claim under test is that the tool answers instead of erroring — Dbg.CallArray throws on a
+		// tool error, so reaching the assertions is itself the main assertion.
+		[DbgFact]
+		public void Return_values_are_reported_without_an_error_after_stepping_out_of_a_call() {
+			// A return value only exists once a call has returned with the debugger watching, so leave
+			// Add and land back in Main just after the call.
+			Dbg.Call("dbg_step", new JObject { ["kind"] = "out" });
+
+			var returns = Dbg.CallArray("dbg_variables", new JObject { ["kind"] = "returns" });
+
+			// An empty list is a legitimate answer; only the shape of what is there is checked.
+			Assert.All(returns, r => {
+				Assert.False(string.IsNullOrWhiteSpace((string?)r["name"]));
+				Assert.NotNull(r["value"]);
+			});
+		}
+
 		[DbgFact]
 		public void A_variable_can_be_assigned_and_the_new_value_reads_back() {
 			Dbg.Call("dbg_set_variable", new JObject { ["target"] = "b", ["value"] = "777" });
@@ -153,6 +230,68 @@ namespace dnSpy.MCP.IntegrationTests {
 
 			var modules = Dbg.CallArray("dbg_modules");
 			Assert.Contains(modules, m => ((string?)m["name"])?.Contains("dbgtest") == true);
+		}
+
+		/// <summary>
+		/// Repoints the session at Program.Inspect, paused on the line after every local has been
+		/// assigned. The class-wide pause is inside Add, which holds nothing but ints; and a
+		/// method-entry breakpoint on Inspect would stop at IL offset 0, where the locals under test
+		/// are still uninitialised. Inspect is called on every pass of the fixture's loop, so the
+		/// first hit is enough and no condition is needed.
+		/// </summary>
+		static void PauseInsideInspect() {
+			Dbg.Reset();
+			Dbg.Call("bp_add_line", new JObject {
+				["module"] = Dbg.FixtureDll(),
+				["method"] = "DbgTest.Program.Inspect",
+				["line"] = FixtureLine("var total = seed + letters.Length + list.Count;"),
+			});
+			Dbg.Call("dbg_start", new JObject { ["path"] = Dbg.FixtureDll() });
+			Dbg.WaitForBreak();
+
+			// A pause occasionally lands with no readable stack, and every test here reads locals as its
+			// first act. The breakpoint is hit once per loop pass, so rather than assert against a pause
+			// that cannot answer, resume and take the next one — a few attempts is plenty when the
+			// passes are 50 ms apart.
+			for (int attempt = 0; attempt < 3 && !Dbg.HasFrames(); attempt++) {
+				Dbg.Call("dbg_continue");
+				Dbg.WaitUntil(() => Dbg.IsRunning, 5000);
+				Dbg.WaitForBreak();
+			}
+			Assert.True(Dbg.HasFrames(), "paused inside Inspect but the stack never became readable");
+		}
+
+		static JToken? Eval(string expression) =>
+			Dbg.CallJson("dbg_eval", new JObject { ["expression"] = expression })["value"];
+
+		/// <summary>
+		/// Reads one child out of a dbg_expand result by member name. An auto-property can surface
+		/// either as the property or as its compiler-generated backing field depending on the
+		/// formatter's settings, so match on the member name appearing in the child's name rather than
+		/// on the two being equal — the test is about walking the graph, not about that setting.
+		/// </summary>
+		static string ChildValue(JObject expanded, string member) {
+			var child = ((JArray)expanded["children"]!)
+				.First(c => ((string?)c["name"])?.Contains(member, StringComparison.Ordinal) == true);
+			return (string?)child["value"] ?? "";
+		}
+
+		/// <summary>
+		/// Finds the 1-based source line of a marker, so line assertions survive edits above them.
+		/// Deliberately a copy of the breakpoint suite's helper: the two suites are independent and
+		/// neither should start failing because the other moved a private method.
+		/// </summary>
+		static int FixtureLine(string marker) {
+			var source = Path.Combine(
+				Environment.GetEnvironmentVariable("DNSPY_MCP_TEST_FIXTURE_SRC")
+					?? throw new InvalidOperationException("DNSPY_MCP_TEST_FIXTURE_SRC is not set"),
+				"Program.cs");
+			var lines = File.ReadAllLines(source);
+			for (int i = 0; i < lines.Length; i++) {
+				if (lines[i].Contains(marker, StringComparison.Ordinal))
+					return i + 1;
+			}
+			throw new InvalidOperationException($"marker not found in fixture source: {marker}");
 		}
 	}
 }
