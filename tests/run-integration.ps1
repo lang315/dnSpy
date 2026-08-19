@@ -92,9 +92,17 @@ function Wait-ForEndpoint($url, $token, $timeoutSec = 90) {
     return $false
 }
 
-# A debuggee left alive holds a file lock on the fixture and breaks the next run.
+# A debuggee left alive holds a file lock on the fixture, and the next run fails in the build step
+# with an error that points at MSBuild rather than at the real cause.
+#
+# Two shapes to catch. Launching dbgtest.exe gives a process named dbgtest; launching dbgtest.dll -
+# which is what dbg_start does, and what most of the suite uses - runs it under dotnet.exe, whose
+# name says nothing about the fixture. Matching only on the name misses exactly the common case.
 function Stop-Leftovers {
     Get-Process -Name 'dbgtest' -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+    Get-CimInstance Win32_Process -Filter "Name='dotnet.exe'" -ErrorAction SilentlyContinue |
+        Where-Object { $_.CommandLine -and $_.CommandLine -match 'dbgtest' } |
+        ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
     foreach ($proc in $started) {
         if ($proc -and -not $proc.HasExited) {
             Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue

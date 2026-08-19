@@ -135,6 +135,55 @@ namespace dnSpy.MCP.IntegrationTests {
 			Assert.Equal("7", (string?)a["value"]);
 		}
 
+		// bp_toggle is otherwise only proven by reading its own flag back, and a breakpoint that
+		// reported enabled=false while still being armed in the runtime would look identical.
+		[DbgFact]
+		public void A_disabled_breakpoint_does_not_stop_the_program() {
+			var bp = Dbg.CallJson("bp_add", new JObject {
+				["module"] = Dbg.FixtureDll(),
+				["token"] = Dbg.TokenOf("DbgTest.Program.Add"),
+			});
+			Dbg.Call("bp_toggle", new JObject { ["id"] = (int)bp["id"]!, ["enabled"] = false });
+
+			Dbg.Call("dbg_start", new JObject { ["path"] = Dbg.FixtureDll() });
+			Assert.True(Dbg.WaitUntil(() => Dbg.IsDebugging, 20000), "session never started");
+
+			Assert.False(Dbg.WaitUntil(() => !Dbg.IsRunning, NeverStopsWindowMs),
+				"the disabled breakpoint stopped the process");
+			Assert.True(Dbg.IsRunning);
+			// A disabled breakpoint is never armed in the runtime, so it cannot have accumulated hits.
+			Assert.Equal(0, Dbg.HitCount(Dbg.CallArray("bp_list").Single()));
+		}
+
+		// Only the true case is covered above, and it cannot tell a working condition from an ignored
+		// one: "a == 7" is reached anyway on the seventh pass, so the process would stop either way.
+		[DbgFact]
+		public void A_condition_that_can_never_hold_does_not_stop_the_program() {
+			Dbg.Call("bp_add", new JObject {
+				["module"] = Dbg.FixtureDll(),
+				["token"] = Dbg.TokenOf("DbgTest.Program.Add"),
+				// The fixture's loop only ever passes a = 1..1000, so this is false at every hit.
+				["condition"] = "a == -1",
+			});
+
+			Dbg.Call("dbg_start", new JObject { ["path"] = Dbg.FixtureDll() });
+			Assert.True(Dbg.WaitUntil(() => Dbg.IsDebugging, 20000), "session never started");
+
+			Assert.False(Dbg.WaitUntil(() => !Dbg.IsRunning, NeverStopsWindowMs),
+				"the process stopped even though the condition was never true");
+			Assert.True(Dbg.IsRunning);
+		}
+
+		/// <summary>
+		/// How long a "must not stop" test lets the fixture run before it accepts that the breakpoint
+		/// is inert. The loop calls Add once per pass and sleeps 50 ms, so even allowing a couple of
+		/// seconds for .NET startup and module load this covers well over a hundred passes through the
+		/// breakpoint's method — a breakpoint that was going to fire has had every chance to. The wait
+		/// is bounded on both ends: WaitUntil also gives up the moment the process does pause, so a
+		/// failing run reports in a second rather than always costing the full window.
+		/// </summary>
+		const int NeverStopsWindowMs = 10000;
+
 		[DbgFact]
 		public void Breakpoints_can_be_listed_toggled_and_removed() {
 			var bp = Dbg.CallJson("bp_add", new JObject {

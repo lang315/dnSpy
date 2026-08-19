@@ -153,12 +153,31 @@ namespace dnSpy.MCP.IntegrationTests {
 			return false;
 		}
 
-		/// <summary>Blocks until a process pauses, returning the paused-state payload.</summary>
+		/// <summary>
+		/// Blocks until a process pauses, returning the paused-state payload.
+		///
+		/// Also waits for the stack to materialise. dbg_wait_for_break returns the moment the engine
+		/// reports "not running", which is a little before the frames are readable — long enough that
+		/// an immediate dbg_locals or dbg_eval intermittently fails with "frame index 0 out of range
+		/// (0 frames)". Tests want "paused and inspectable", so wait for that here rather than making
+		/// every caller retry.
+		/// </summary>
 		public static JObject WaitForBreak(int timeoutMs = 30000) {
 			var text = Call("dbg_wait_for_break", new JObject { ["timeout_ms"] = timeoutMs });
 			if (text.StartsWith("timeout", StringComparison.Ordinal))
 				throw new TimeoutException("no process paused: " + text);
+			WaitUntil(HasFrames, 15000);
 			return JObject.Parse(text);
+		}
+
+		/// <summary>True once the paused thread reports at least one stack frame.</summary>
+		public static bool HasFrames() {
+			try {
+				return ((JArray)CallJson("dbg_callstack", new JObject { ["max_frames"] = 1 })["frames"]!).Count > 0;
+			}
+			catch (DbgToolException) {
+				return false;
+			}
 		}
 	}
 
