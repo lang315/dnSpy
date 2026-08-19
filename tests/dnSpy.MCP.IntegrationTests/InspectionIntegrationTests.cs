@@ -239,6 +239,30 @@ namespace dnSpy.MCP.IntegrationTests {
 		/// are still uninitialised. Inspect is called on every pass of the fixture's loop, so the
 		/// first hit is enough and no condition is needed.
 		/// </summary>
+		// No test here for expanding a BCL collection such as List<T>. Measured, and worth recording so
+		// nobody spends the afternoon rediscovering it: the curated view always fails (the type has a
+		// DebuggerTypeProxy and every child returns "Internal debugger error"), and the raw view works
+		// only sometimes — the same call succeeds run-to-run depending on engine state. Asserting
+		// either outcome would either enshrine a dnSpy bug or produce a flaky test. Use dbg_eval
+		// (list.Count, list[0], list._items) instead, which is dependable.
+
+		// The raw view is the only way to see a compiler-generated backing field, and hiding those is
+		// exactly what the curated view is for — so the two must genuinely differ.
+		[DbgFact]
+		public void The_raw_view_shows_members_the_curated_view_hides() {
+			PauseInsideInspect();
+
+			var curated = (JArray)Dbg.CallJson("dbg_expand", new JObject { ["expression"] = "graph" })["children"]!;
+			var raw = (JArray)Dbg.CallJson("dbg_expand", new JObject {
+				["expression"] = "graph",
+				["raw"] = true,
+			})["children"]!;
+
+			Assert.True(raw.Count > curated.Count, "the raw view should expose more than the curated one");
+			Assert.DoesNotContain(curated, c => ((string?)c["name"])?.Contains("k__BackingField") == true);
+			Assert.Contains(raw, c => ((string?)c["name"])?.Contains("k__BackingField") == true);
+		}
+
 		static void PauseInsideInspect() {
 			Dbg.Reset();
 			Dbg.Call("bp_add_line", new JObject {

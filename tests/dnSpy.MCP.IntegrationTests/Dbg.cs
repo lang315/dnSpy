@@ -1,5 +1,7 @@
 using System;
 using System.IO;
+using System.Net.Http;
+using System.Net.Sockets;
 using System.Threading;
 using dnSpy.MCP.Tests; // Rpc/RpcResponse, shared with the Tier 1 project via a linked source file
 using Newtonsoft.Json.Linq;
@@ -35,13 +37,28 @@ namespace dnSpy.MCP.IntegrationTests {
 		public static string FixtureDll(string tfm = "net8.0") => Path.Combine(FixtureDir(tfm), "dbgtest.dll");
 		public static string FixtureExe(string tfm = "net8.0") => Path.Combine(FixtureDir(tfm), "dbgtest.exe");
 
+		/// <summary>Set once dnSpy stops answering, so later tests report the cause rather than a symptom.</summary>
+		static volatile bool serverGone;
+
 		/// <summary>Calls a tool and returns its text payload. Throws if the tool reported an error.</summary>
 		public static string Call(string tool, JObject? args = null) {
+			if (serverGone)
+				throw new DbgServerGoneException(tool, null);
 			// Every request this suite sends to dnSpy leaves through here, so the isolation check
 			// cannot be ordered around — not by a test-class constructor, not by a new test that
 			// forgets to opt in. Nothing destructive can reach the wire ahead of it.
 			SafetyGate.Enforce();
-			var res = Rpc.Post(Url!, Rpc.CallTool(Interlocked.Increment(ref nextId), tool, args), Token);
+			RpcResponse res;
+			try {
+				res = Rpc.Post(Url!, Rpc.CallTool(Interlocked.Increment(ref nextId), tool, args), Token);
+			}
+			catch (Exception ex) when (ex is HttpRequestException or IOException or SocketException) {
+				// dnSpy is gone. Say so once and the same way every time: without this, the first test
+				// after a crash fails on a transport error and every later one fails on something that
+				// looks unrelated, which reads as twenty broken tests instead of one dead debugger.
+				serverGone = true;
+				throw new DbgServerGoneException(tool, ex);
+			}
 			if (res.Json["error"] is not null)
 				throw new InvalidOperationException($"{tool}: protocol error {res.Json["error"]}");
 			if (res.ToolIsError)
@@ -145,6 +162,9 @@ namespace dnSpy.MCP.IntegrationTests {
 				catch (DbgUnsafeTargetException) {
 					throw; // a refusal is never transient, and must not be polled away
 				}
+				catch (DbgServerGoneException) {
+					throw; // neither is a dead debugger — polling it just burns the timeout
+				}
 				catch (Exception) {
 					// Transient while the engine is starting or tearing down.
 				}
@@ -184,5 +204,18 @@ namespace dnSpy.MCP.IntegrationTests {
 	sealed class DbgToolException : Exception {
 		public string ToolMessage { get; }
 		public DbgToolException(string tool, string message) : base($"{tool}: {message}") => ToolMessage = message;
+	}
+
+	/// <summary>
+	/// dnSpy stopped answering mid-run. Almost always a crash rather than a shutdown: dnSpy's own
+	/// Locals window re-evaluates on every call stack change and reads the debuggee's PE image out of
+	/// its memory, which faults when a process is torn down under it. Check the Windows Application
+	/// event log for dnSpy.exe with 0xC0000005 or 0xC0000374.
+	/// </summary>
+	sealed class DbgServerGoneException : Exception {
+		public DbgServerGoneException(string tool, Exception? inner)
+			: base($"dnSpy is no longer answering (during {tool}) — it most likely crashed. " +
+				"Check the Windows Application event log for dnSpy.exe 0xC0000005 / 0xC0000374. " +
+				"Every later failure in this run is a consequence of this, not a separate defect.", inner) { }
 	}
 }

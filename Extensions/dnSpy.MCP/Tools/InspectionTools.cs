@@ -113,11 +113,12 @@ namespace dnSpy.MCP.Tools {
 				Eval);
 
 			yield return new ToolDef("dbg_expand",
-				"Evaluate an expression and list its immediate child members (fields/elements). Use to drill into objects and arrays.",
+				"Evaluate an expression and list its immediate child members (fields/elements). Use to drill into objects and arrays. Set 'raw' to see the underlying fields instead of the curated view. Types with a debugger type proxy, such as List<T>, may not expand at all — read those with dbg_eval instead (list.Count, list[0], list._items).",
 				Schema.Object(
 					("expression", Schema.Str("Expression whose children to list"), true),
 					("frame_index", Schema.Int("Frame index, 0 = top (default 0)"), false),
 					("max_children", Schema.Int("Maximum children to return (default 100)"), false),
+					("raw", Schema.Bool("Show the real fields, ignoring any debugger type proxy or display attributes (default false)"), false),
 					("thread_id", Schema.Int("Native thread id; defaults to the current thread"), false)),
 				Expand);
 
@@ -207,6 +208,11 @@ namespace dnSpy.MCP.Tools {
 			var threadId = (ulong?)(long?)args["thread_id"];
 			return dbg.Invoke(() => {
 				var (frame, language) = ResolveFrame(threadId, frameIndex);
+				// Deliberately NOT NoMethodBody. That option skips the decompilation this context needs:
+				// measured, it leaves dbg_locals empty and every expression unresolvable. It is worth
+				// stating because that decompilation is the same path dnSpy's own Locals window runs,
+				// and it is where dnSpy sometimes faults — but the alternative is a tool that returns
+				// nothing.
 				var context = language.CreateContext(frame, funcEvalTimeout: FuncEvalTimeout,
 					cancellationToken: CancellationToken.None);
 				try {
@@ -260,10 +266,13 @@ namespace dnSpy.MCP.Tools {
 		string Expand(JObject args) {
 			var expression = (string?)args["expression"] ?? throw new ArgumentException("'expression' is required");
 			var maxChildren = Clamp((int?)args["max_children"] ?? 100, 1, 1000);
+			// Raw view drops the curated presentation entirely, so it also drops the flags that shape
+			// it: private and compiler-generated fields are the point here, not noise to hide.
+			var options = ((bool?)args["raw"] ?? false) ? DbgValueNodeEvaluationOptions.RawView : NodeOptions;
 			return WithFrame(args, (evalInfo, language) => {
 				var ee = language.ExpressionEvaluator;
 				var res = language.ValueNodeFactory.Create(evalInfo, expression,
-					NodeOptions, DbgEvaluationOptions.Expression, ee.CreateExpressionEvaluatorState());
+					options, DbgEvaluationOptions.Expression, ee.CreateExpressionEvaluatorState());
 				var node = res.ValueNode;
 				var writer = new DbgStringBuilderTextWriter();
 				var obj = new JObject {
@@ -275,7 +284,7 @@ namespace dnSpy.MCP.Tools {
 					var count = node.GetChildCount(evalInfo);
 					var take = (int)Math.Min((ulong)maxChildren, count);
 					var arr = new JArray();
-					foreach (var child in node.GetChildren(evalInfo, 0, take, NodeOptions)) {
+					foreach (var child in node.GetChildren(evalInfo, 0, take, options)) {
 						arr.Add(new JObject {
 							["name"] = FormatName(child, evalInfo, writer),
 							["value"] = child.HasError ? child.ErrorMessage : FormatValue(child, evalInfo, writer),
@@ -372,15 +381,50 @@ namespace dnSpy.MCP.Tools {
 		}
 
 		DbgThread ResolveThread(ulong? threadId) {
-			if (threadId is null) {
-				return Mgr.CurrentThread.Current
-					?? throw new InvalidOperationException("no current thread; is a process paused?");
-			}
+			if (threadId is null)
+				return DefaultThread();
 			foreach (var p in Mgr.Processes)
 				foreach (var t in p.Threads)
 					if (t.Id == threadId.Value)
 						return t;
 			throw new InvalidOperationException($"no thread with id {threadId.Value}");
+		}
+
+		/// <summary>
+		/// The thread to inspect when the caller named none.
+		///
+		/// CurrentThread.Current is the right answer almost always, but it is not pinned to the thread
+		/// that hit the breakpoint: it drifts, and a caller that lands on a runtime thread with no
+		/// managed frames gets "frame index 0 out of range (0 frames)" while the process is sitting on
+		/// its breakpoint. An agent has no way to tell that apart from a genuinely empty stack. Prefer
+		/// the current thread when it can answer, and otherwise pick a paused thread that can.
+		/// </summary>
+		DbgThread DefaultThread() {
+			var current = Mgr.CurrentThread.Current;
+			if (current is not null && HasFrames(current))
+				return current;
+
+			foreach (var p in Mgr.Processes) {
+				if (p.State != DbgProcessState.Paused)
+					continue;
+				foreach (var t in p.Threads) {
+					if (HasFrames(t))
+						return t;
+				}
+			}
+
+			// Keep the original message: no thread could answer, which is what the caller needs to know.
+			return current ?? throw new InvalidOperationException("no current thread; is a process paused?");
+		}
+
+		static bool HasFrames(DbgThread thread) {
+			try {
+				return thread.Process.State == DbgProcessState.Paused && thread.GetFrames(1).Length > 0;
+			}
+			catch (Exception) {
+				// A thread that faults while being asked is not one to hand back.
+				return false;
+			}
 		}
 
 		(DbgStackFrame frame, DbgLanguage language) ResolveFrame(ulong? threadId, int frameIndex) {
