@@ -1,0 +1,28 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+      Fixture debuggee. Built for both runtimes on purpose: net48 exercises the .NET Framework
+      engine path, and net8.0 produces an apphost .exe next to a .dll + .runtimeconfig.json, which
+      is what dbg_start's runtime heuristic and its apphost-to-dll swap need to be tested against.
+
+      Debug configuration with a portable PDB is required — bp_add_line resolves source lines from
+      sequence points, so an optimized build without symbols would make those tests meaningless.
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFrameworks>net48;net8.0</TargetFrameworks>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <IsPackable>false</IsPackable>
+    <AssemblyName>dbgtest</AssemblyName>
+    <RootNamespace>DbgTest</RootNamespace>
+    <DebugType>portable</DebugType>
+    <DebugSymbols>true</DebugSymbols>
+    <Optimize>false</Optimize>
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
+    <!-- Keep IL predictable so IL offsets and sequence points stay stable across builds. -->
+    <Deterministic>true</Deterministic>
+    <ProduceReferenceAssembly>false</ProduceReferenceAssembly>
+  </PropertyGroup>
+
+</Project>
