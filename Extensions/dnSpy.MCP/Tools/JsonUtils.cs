@@ -55,7 +55,10 @@ namespace dnSpy.MCP.Tools {
 		public static byte[] ParseHexBytes(string? text, string field) {
 			if (text is null)
 				throw new ArgumentException($"'{field}' is required");
-			var clean = text.Replace("0x", "").Replace("0X", "").Replace(" ", "").Replace("-", "").Replace(",", "");
+			// Drop separators, then strip every "0x"/"0X" so both a single "0xDEAD" and per-byte
+			// "0x90 0x90" work. This is safe: 'x' is not a hex digit, so "0x" can only ever be a
+			// prefix, never part of a real byte value.
+			var clean = text.Replace(" ", "").Replace("-", "").Replace(",", "").Replace("0x", "").Replace("0X", "");
 			if (clean.Length % 2 != 0)
 				throw new ArgumentException($"'{field}' must have an even number of hex digits");
 			var bytes = new byte[clean.Length / 2];

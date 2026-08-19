@@ -170,7 +170,10 @@ namespace dnSpy.MCP.Server {
 				}
 				// Handle off the accept thread: long-poll tools (dbg_wait_for_break, dbg_step) must
 				// not block other requests. DbgAccess serializes all debugger reads onto one thread.
-				ThreadPool.QueueUserWorkItem(_ => {
+				// A dedicated thread per request (not the ThreadPool) means a handful of multi-minute
+				// long-polls can't starve the pool and delay unrelated requests; request volume from a
+				// single agent driving a debugger is low, so the per-thread cost is negligible.
+				var worker = new Thread(() => {
 					try {
 						Handle(ctx);
 					}
@@ -178,7 +181,8 @@ namespace dnSpy.MCP.Server {
 						log($"MCP request failed: {ex.Message}");
 						try { ctx.Response.Abort(); } catch { }
 					}
-				});
+				}) { IsBackground = true, Name = "dnSpy.MCP.req" };
+				worker.Start();
 			}
 		}
 
@@ -225,9 +229,12 @@ namespace dnSpy.MCP.Server {
 				return;
 			}
 
-			string body;
-			using (var reader = new StreamReader(req.InputStream, req.ContentEncoding ?? Encoding.UTF8))
-				body = reader.ReadToEnd();
+			// Bound the read regardless of Content-Length: a chunked request reports -1 and would
+			// otherwise let ReadToEnd pull an unbounded body into memory.
+			if (!TryReadBody(req, out var body)) {
+				WriteText(ctx, 413, "text/plain", "request too large");
+				return;
+			}
 
 			JObject request;
 			try {
@@ -361,11 +368,34 @@ namespace dnSpy.MCP.Server {
 		}
 
 		static bool FixedTimeEquals(string a, string b) {
-			// Constant-time compare so the token can't be recovered by timing.
+			// Constant-time compare so the token can't be recovered by timing. Loop over the longer
+			// string (clamping the index into each) so the iteration count reveals only the total
+			// length, never which input is shorter or where the first mismatch is.
 			int diff = a.Length ^ b.Length;
-			for (int i = 0; i < a.Length && i < b.Length; i++)
-				diff |= a[i] ^ b[i];
+			int n = Math.Max(a.Length, b.Length);
+			for (int i = 0; i < n; i++) {
+				char ca = i < a.Length ? a[i] : '\0';
+				char cb = i < b.Length ? b[i] : '\0';
+				diff |= ca ^ cb;
+			}
 			return diff == 0;
+		}
+
+		// Reads the request body, capping it at MaxBodyBytes. Returns false if the cap is exceeded.
+		static bool TryReadBody(HttpListenerRequest req, out string body) {
+			var sb = new StringBuilder();
+			var buffer = new char[8192];
+			using var reader = new StreamReader(req.InputStream, req.ContentEncoding ?? Encoding.UTF8);
+			int read;
+			while ((read = reader.Read(buffer, 0, buffer.Length)) > 0) {
+				sb.Append(buffer, 0, read);
+				if (sb.Length > MaxBodyBytes) {
+					body = "";
+					return false;
+				}
+			}
+			body = sb.ToString();
+			return true;
 		}
 
 		static JObject ToolContent(string text, bool isError) => new JObject {
