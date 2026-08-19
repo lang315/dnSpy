@@ -34,6 +34,10 @@ using static dnSpy.MCP.Tools.JsonUtils;
 namespace dnSpy.MCP.Tools {
 	/// <summary>Read-only inspection of a paused debuggee: threads, call stack, locals, modules, eval.</summary>
 	sealed class InspectionTools {
+		// Evaluation can run user code (property getters, ToString) on the single debug-engine thread,
+		// so the 10s default in DbgAccess.Invoke is too aggressive here; give eval-based tools more room.
+		const int EvalTimeoutMs = 60000;
+
 		const DbgStackFrameFormatterOptions FrameOptions =
 			DbgStackFrameFormatterOptions.ModuleNames |
 			DbgStackFrameFormatterOptions.ParameterTypes |
@@ -172,7 +176,7 @@ namespace dnSpy.MCP.Tools {
 					["threadId"] = (long)thread.Id,
 					["frames"] = arr,
 				});
-			});
+			}, EvalTimeoutMs);
 		}
 
 		// Every eval-based tool resolves the frame (from frame_index/thread_id), creates a language
@@ -191,7 +195,7 @@ namespace dnSpy.MCP.Tools {
 				finally {
 					context.Close();
 				}
-			});
+			}, EvalTimeoutMs);
 		}
 
 		string Locals(JObject args) => WithFrame(args, (evalInfo, language) => {

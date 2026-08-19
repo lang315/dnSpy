@@ -57,9 +57,9 @@ namespace dnSpy.MCP.Tools {
 
 		public IEnumerable<ToolDef> Create() {
 			yield return new ToolDef("bp_add",
-				"Add an IL-offset method breakpoint. Identify the method by module name and metadata token; breakpoints can be set before the process starts (they bind when the module loads).",
+				"Add an IL-offset method breakpoint. Identify the method by module and metadata token; breakpoints can be set before the process starts (they bind when the module loads). The module must be a full path or already open in dnSpy.",
 				Schema.Object(
-					("module", Schema.Str("Module file name or path, e.g. 'MyApp.dll'"), true),
+					("module", Schema.Str("Module file path, or file name if already open in dnSpy"), true),
 					("token", Schema.Str("Method metadata token, hex (0x06000001) or decimal"), true),
 					("il_offset", Schema.Str("IL offset into the method body, hex or decimal (default 0)"), false),
 					("condition", Schema.Str("C#/VB condition expression; break only when true"), false),
@@ -114,7 +114,10 @@ namespace dnSpy.MCP.Tools {
 			var hitCount = (int?)args["hit_count"];
 
 			return dbg.Invoke(() => {
-				var moduleId = ModuleId.Create(module);
+				// Derive the ModuleId from the resolved module so it matches the loaded module exactly.
+				// ModuleId.Create(string) would resolve a bare file name against dnSpy's working directory
+				// and compare on the full path, so a name like 'MyApp.dll' would never bind.
+				var moduleId = moduleIdProvider.Value.Create(ResolveModuleDef(module));
 				var settings = MakeSettings(enabled, condition);
 				if (hitCount is { } hc && hc > 0)
 					settings.HitCount = new DbgCodeBreakpointHitCount(DbgCodeBreakpointHitCountKind.GreaterThanOrEquals, hc);
