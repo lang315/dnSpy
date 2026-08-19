@@ -36,6 +36,16 @@ namespace dnSpy.MCP.Tests {
 			PooledConnectionLifetime = TimeSpan.FromSeconds(5),
 		}) { Timeout = TimeSpan.FromSeconds(100) };
 
+		/// <summary>
+		/// Runs before every request, given the target URL. The integration project sets this to its
+		/// settings-file interlock so that even a test which calls Rpc directly — bypassing the Dbg
+		/// helper — cannot reach a non-isolated dnSpy and delete real breakpoints. Tier 1 leaves it null.
+		/// This is a per-assembly static: Rpc is a linked source file, so each test assembly has its own.
+		/// </summary>
+		public static Action<string>? RequestGuard;
+
+		internal static void Guard(string url) => RequestGuard?.Invoke(url);
+
 		public static RpcResponse Post(string url, JObject payload, string? token = null,
 			string? origin = null, string? host = null) =>
 			Send(url, HttpMethod.Post, payload.ToString(Newtonsoft.Json.Formatting.None), token, origin, host);
@@ -62,6 +72,7 @@ namespace dnSpy.MCP.Tests {
 
 		/// <summary>Sends a verbatim Authorization header, so non-Bearer schemes can be exercised.</summary>
 		public static RpcResponse PostWithRawAuth(string url, JObject payload, string authHeader) {
+			Guard(url);
 			using var req = new HttpRequestMessage(HttpMethod.Post, url) {
 				Content = new StringContent(payload.ToString(Newtonsoft.Json.Formatting.None),
 					Encoding.UTF8, "application/json"),
@@ -76,6 +87,7 @@ namespace dnSpy.MCP.Tests {
 
 		public static RpcResponse Send(string url, HttpMethod method, string? body,
 			string? token = null, string? origin = null, string? host = null) {
+			Guard(url);
 			using var req = new HttpRequestMessage(method, url);
 			if (body is not null)
 				req.Content = new StringContent(body, Encoding.UTF8, "application/json");
@@ -90,6 +102,7 @@ namespace dnSpy.MCP.Tests {
 		/// size up front, which is exactly the path that used to read an unbounded body.
 		/// </summary>
 		public static RpcResponse PostChunked(string url, int totalBytes, string? token = null) {
+			Guard(url);
 			using var req = new HttpRequestMessage(HttpMethod.Post, url);
 			req.Content = new PushStreamContent(totalBytes);
 			req.Headers.TransferEncodingChunked = true;
@@ -179,6 +192,7 @@ namespace dnSpy.MCP.Tests {
 		public HttpStatusCode Status { get; private set; }
 
 		public SseStream(string url, string? token = null) {
+			Rpc.Guard(url);
 			var req = new HttpRequestMessage(HttpMethod.Get, url);
 			req.Headers.TryAddWithoutValidation("Accept", "text/event-stream");
 			if (token is not null)

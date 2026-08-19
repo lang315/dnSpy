@@ -92,7 +92,7 @@ Inspection (require a paused process):
 - `dbg_variables` — `returns` / `statics` / `exceptions` (dnSpy's .NET engine does not implement
   `autos`; the tool says so rather than returning its placeholder)
 - `dbg_eval` — C#/VB `expression` in a frame's context
-- `dbg_expand` — list an expression's child members (drill into objects/arrays)
+- `dbg_expand` — list an expression's child members (drill into objects/arrays); `raw` shows the underlying fields instead of the curated view
 - `dbg_set_variable` — assign a new value to a variable
 - `dbg_set_next_statement` — move the instruction pointer to another IL offset
 - `dbg_read_memory` / `dbg_write_memory` — raw process memory as hex
@@ -107,21 +107,36 @@ step complete, break), so an agent can react without polling `dbg_wait_for_break
 
 ## Manual smoke test
 
-With dnSpy running:
+With dnSpy running (authentication is on by default, so pass the token):
 
 ```sh
-curl -s http://127.0.0.1:27115/mcp -H 'content-type: application/json' \
+TOKEN=$(cat "$APPDATA/dnSpy/mcp-token.txt")   # or read %APPDATA%\dnSpy\mcp-token.txt
+
+curl -s http://127.0.0.1:27115/mcp -H "authorization: Bearer $TOKEN" -H 'content-type: application/json' \
   -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}'
 
-curl -s http://127.0.0.1:27115/mcp -H 'content-type: application/json' \
-  -d '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}'
-
-curl -s http://127.0.0.1:27115/mcp -H 'content-type: application/json' \
-  -d '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"dbg_status","arguments":{}}}'
+curl -s http://127.0.0.1:27115/mcp -H "authorization: Bearer $TOKEN" -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"dnspy_info","arguments":{}}}'
 ```
 
-## Notes / limits (v1)
+Without the header you get `401` — whose body tells you where the token file is.
 
-- Breakpoints are identified by module name + method metadata token + IL offset — there is no source-line or method-name resolution yet.
-- `dbg_locals` returns one level of variables (no lazy child expansion).
+## Tests
+
+Three tiers, under `tests/`:
+
+- **Tier 1** (`tests/dnSpy.MCP.Tests`) — stands up a real `McpServer` over loopback HTTP with stub
+  tools, so it needs no dnSpy, WPF or debug engine. Runs in CI (`.github/workflows/mcp-tests.yml`):
+  `dotnet test tests/dnSpy.MCP.Tests`.
+- **Tier 2** (`tests/dnSpy.MCP.IntegrationTests`) — drives a real dnSpy against the `tests/fixture/dbgtest`
+  debuggee. Run it with **`tests/run-integration.ps1`**, which launches dnSpy with `--settings-file` at a
+  temp path; a `SafetyGate` refuses to run against a dnSpy using your real profile (the suite clears all
+  breakpoints). Needs an interactive desktop, so it is not in CI.
+- **Tier 3** — MCP-client conformance (MCP Inspector / Claude Code), run by hand before a release.
+
+## Notes / limits
+
 - All debugger access is marshaled onto dnSpy's debug-engine thread; each tool call runs to completion before the next is handled.
+- **Bitness must match the debuggee** (CorDebug): use the x86 dnSpy (`build.ps1 net-x86`) for 32-bit targets.
+- A few limits are dnSpy's, not this extension's, and each is surfaced rather than hidden: `dbg_variables kind=autos` is unimplemented by the .NET engine (the tool says so); collections behind a `DebuggerTypeProxy` such as `List<T>` may not expand — read them with `dbg_eval` (`list.Count`, `list[0]`); at a first-chance exception pause the thread sits on a native transition frame where evaluation is refused.
+- **Func-eval that reads a local can fail at the very first breakpoint hit** right after launch (`Math.Max(a, b)` times out while `Math.Max(1, 2)` and `a + b` work), then works from the second hit on. It is a CorDebug first-hit quirk, not the extension — if a func-eval times out on the first stop, continue and retry.
