@@ -98,12 +98,13 @@ namespace dnSpy.MCP.IntegrationTests {
 		/// <summary>
 		/// Drops all breakpoints and stops any session, so each test starts from a known state.
 		///
-		/// The teardown order matters. dnSpy's own Locals window re-evaluates whenever the call stack
-		/// changes, and that path decompiles the paused method by reading the debuggee's PE image
-		/// straight out of its memory. Terminating a process while it is paused lets that UI refresh
-		/// race the teardown and read freed memory, which takes the whole app down with an
-		/// AccessViolationException — no MCP code involved. Clearing breakpoints and resuming first
-		/// means the UI is not sitting on a frame when the process goes away.
+		/// Resuming before stopping is precautionary, not proven necessary. dnSpy once died here with
+		/// an AccessViolationException: its own Locals window re-evaluates on every call stack change,
+		/// and that path reads the debuggee's PE image out of its memory, so terminating a paused
+		/// process let the refresh race the teardown — no MCP code in the stack. It has not recurred
+		/// since dbg_start stopped returning before a process exists (65 measured stop-while-paused
+		/// iterations, zero crashes; see tests/bisect-stop-crash.ps1). Kept because it costs nothing
+		/// and the failure it guards against takes the whole app down.
 		/// </summary>
 		public static void Reset() {
 			// Stated again at the destructive entry point even though Call/TryCall already enforce it:
