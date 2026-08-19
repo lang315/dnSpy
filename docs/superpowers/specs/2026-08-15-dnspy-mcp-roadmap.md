@@ -7,9 +7,11 @@ Ngày: 2026-08-15
 
 Extension đã **sẵn sàng release**. Vài dòng cũ bên dưới nay đã lỗi thời; trạng thái cuối:
 
-- **33 tool** (thêm `dnspy_info`). Xác thực **bật mặc định** (token sinh tự động, lưu cạnh file settings).
-- **Đã có test project trong repo** (bác bỏ mục 19): Tier 1 (98 test, chạy CI qua `mcp-tests.yml`),
-  Tier 2 (72 pass + 1 skip có lý do, cần desktop, chạy qua `run-integration.ps1`), Tier 3 conformance.
+- **36 tool** — thêm `dnspy_info` và nhóm **phân tích tĩnh** `decompile`/`list_types`/`list_methods`
+  (đọc & khám phá assembly không cần debug session). Xác thực **bật mặc định** (token sinh tự động,
+  lưu cạnh file settings).
+- **Đã có test project trong repo** (bác bỏ mục 19): Tier 1 (105 test, chạy CI qua `mcp-tests.yml`),
+  Tier 2 (82 pass + 1 skip có lý do, cần desktop, chạy qua `run-integration.ps1`), Tier 3 conformance.
 - **Đã verify runtime thật trên Windows x64 và x86**, và **e2e trên app thật** (MilkMax x86 obfuscated,
   PageMiner x64) — kể cả build bản dnSpy x86 để debug target 32-bit.
 - Các mục P2 còn treo là **quyết định có chủ đích**, không phải thiếu sót: structured content (16),

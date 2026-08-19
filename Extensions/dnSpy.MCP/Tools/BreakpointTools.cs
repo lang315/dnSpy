@@ -19,7 +19,6 @@
 
 using System;
 using System.Collections.Generic;
-using System.IO;
 using System.Linq;
 using dnlib.DotNet;
 using dnSpy.Contracts.Debugger.Breakpoints.Code;
@@ -182,48 +181,11 @@ namespace dnSpy.MCP.Tools {
 			return settings;
 		}
 
-		ModuleDef ResolveModuleDef(string module) {
-			IDsDocument? doc;
-			if (File.Exists(module))
-				doc = documentService.Value.TryGetOrCreate(DsDocumentInfo.CreateDocument(module));
-			else
-				doc = documentService.Value.GetDocuments().FirstOrDefault(d =>
-					string.Equals(Path.GetFileName(d.Filename), module, StringComparison.OrdinalIgnoreCase) ||
-					string.Equals(d.ModuleDef?.Name, module, StringComparison.OrdinalIgnoreCase));
-			return doc?.ModuleDef
-				?? throw new InvalidOperationException($"could not load module '{module}'; pass a full path or open it in dnSpy first");
-		}
+		ModuleDef ResolveModuleDef(string module) =>
+			MetadataResolver.ResolveModule(documentService.Value, module);
 
-		static MethodDef[] ResolveMethods(ModuleDef module, string fullName) {
-			var idx = fullName.LastIndexOf('.');
-			if (idx <= 0)
-				throw new ArgumentException("'method' must be fully qualified, e.g. 'Namespace.Type.Method'");
-			var typeName = fullName.Substring(0, idx);
-			var methodName = fullName.Substring(idx + 1);
-			var type = FindType(module, typeName)
-				?? throw new InvalidOperationException($"type not found: {typeName}");
-			var methods = type.Methods.Where(m => m.Name == methodName).ToArray();
-			if (methods.Length == 0)
-				throw new InvalidOperationException($"method not found: {methodName} in {typeName}");
-			return methods;
-		}
-
-		// A nested type's reflection name uses '+', not '.'. The caller passes '.', so progressively
-		// turn the rightmost '.' into '+' until the type resolves (handles arbitrary nesting depth).
-		static TypeDef? FindType(ModuleDef module, string typeName) {
-			var type = module.Find(typeName, isReflectionName: true);
-			if (type is not null)
-				return type;
-			var candidate = typeName;
-			int dot;
-			while ((dot = candidate.LastIndexOf('.')) > 0) {
-				candidate = candidate.Substring(0, dot) + "+" + candidate.Substring(dot + 1);
-				type = module.Find(candidate, isReflectionName: true);
-				if (type is not null)
-					return type;
-			}
-			return null;
-		}
+		static MethodDef[] ResolveMethods(ModuleDef module, string fullName) =>
+			MetadataResolver.ResolveMethods(module, fullName);
 
 		string List() => dbg.Invoke(() => {
 			var arr = new JArray(bpService.Value.Breakpoints

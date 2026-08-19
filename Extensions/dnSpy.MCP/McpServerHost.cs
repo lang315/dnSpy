@@ -30,6 +30,7 @@ using dnSpy.Contracts.Debugger.DotNet.Breakpoints.Code;
 using dnSpy.Contracts.Debugger.DotNet.Code;
 using dnSpy.Contracts.Debugger.Evaluation;
 using dnSpy.Contracts.Debugger.Exceptions;
+using dnSpy.Contracts.Decompiler;
 using dnSpy.Contracts.Documents;
 using dnSpy.Contracts.Metadata;
 using dnSpy.MCP.Server;
@@ -56,6 +57,7 @@ namespace dnSpy.MCP {
 		readonly Lazy<IDsDocumentService> documentService;
 		readonly Lazy<DbgExceptionSettingsService> exceptionService;
 		readonly Lazy<DbgModuleBreakpointsService> moduleBpService;
+		readonly Lazy<IDecompilerService> decompilerService;
 
 		McpServer? server;
 
@@ -65,7 +67,7 @@ namespace dnSpy.MCP {
 			Lazy<DbgCodeBreakpointHitCountService> hitCountService, Lazy<DbgLanguageService> languageService,
 			Lazy<DbgDotNetCodeLocationFactory> codeLocationFactory, Lazy<IModuleIdProvider> moduleIdProvider,
 			Lazy<IDsDocumentService> documentService, Lazy<DbgExceptionSettingsService> exceptionService,
-			Lazy<DbgModuleBreakpointsService> moduleBpService) {
+			Lazy<DbgModuleBreakpointsService> moduleBpService, Lazy<IDecompilerService> decompilerService) {
 			this.dbgManager = dbgManager;
 			this.attachService = attachService;
 			this.bpService = bpService;
@@ -77,6 +79,7 @@ namespace dnSpy.MCP {
 			this.documentService = documentService;
 			this.exceptionService = exceptionService;
 			this.moduleBpService = moduleBpService;
+			this.decompilerService = decompilerService;
 		}
 
 		public void Start() {
@@ -97,6 +100,9 @@ namespace dnSpy.MCP {
 				tools.AddRange(new MemoryTools(dbg).Create());
 				tools.AddRange(new ExceptionTools(dbg, exceptionService).Create());
 				tools.AddRange(new ModuleBreakpointTools(dbg, moduleBpService).Create());
+				// Static analysis: no debug engine, so these are constructed with only the document and
+				// decompiler services and run off the dispatcher.
+				tools.AddRange(new StaticTools(documentService, decompilerService).Create());
 				// Counts the live list rather than a snapshot, so the reported total covers every tool
 				// including this one — the count is not knowable while the list is still being built.
 				tools.AddRange(new InfoTools(port, () => auth.Token is not null,
