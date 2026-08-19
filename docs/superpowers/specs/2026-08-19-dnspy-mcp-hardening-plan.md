@@ -2,7 +2,53 @@
 
 Ngày: 2026-08-19
 Bối cảnh: sau khi Tier 1/2/3 xanh (125 check). Extension dùng được, nhưng còn ba điểm đã nêu khi
-bàn giao. Tài liệu này là kế hoạch xử lý, chưa triển khai.
+bàn giao.
+
+## Cập nhật: đã triển khai (2026-08-19)
+
+**P1, P2, P3b đã làm và verify. P3a đo xong và quyết định KHÔNG sửa.**
+
+Kết quả sau khi triển khai: Tier 1 **98/98**, Tier 2 **33/33**, Tier 3 conformance **toàn bộ pass**.
+
+- **P1 xong** — `TokenStore` sinh token lần đầu, lưu `mcp-token.txt` cạnh file settings; `DNSPY_MCP_TOKEN`
+  vẫn thắng, `DNSPY_MCP_NO_AUTH=1` để tắt. 401 ghi rõ đường dẫn file token. 15 test.
+- **P2 xong** — tool `dnspy_info` + `SafetyGate` đặt tại `Dbg.Call`, điểm nghẽn duy nhất mọi request
+  đi qua, nên constructor của test class không thể chạy trước nó. `run-integration.ps1` từ chối chạy
+  khi đã có dnSpy mở. 10 test.
+- **P3b xong** — `dbg_variables kind=autos` nay báo lỗi có hướng dẫn. Điều kiện nhận diện bám vào
+  đúng hình dạng stub của dnSpy (`DbgEngineAutosProviderImpl.GetNodesCore` tạo mảng 1 phần tử qua
+  `CreateError(name="Error", "NYI", "NYI")`), không phải đoán chuỗi.
+
+### P3a — đo xong, kết luận: không sửa `dbg_stop`
+
+Bisect 4 biến thể trên bản hiện tại: **0 crash / 10 vòng mỗi biến thể**, kể cả `StopImmediately` là
+biến thể bị nghi. Chạy thêm 25 vòng `StopImmediately` riêng: cũng 0. Tổng 65 vòng stop-while-paused,
+dnSpy không chết lần nào.
+
+Độ tin cậy của kết quả rỗng: không cần tin vào bộ phát hiện crash của harness, vì **nếu dnSpy chết
+thì các vòng sau không thể chạy tiếp** — endpoint biến mất. Cả 65 vòng chạy liên tục trên **một** lần
+khởi động duy nhất, tức dnSpy sống suốt.
+
+Theo đúng quy tắc đặt ra trong kế hoạch — chỉ đưa resume-trước-stop vào `dbg_stop` nếu có bằng chứng
+nó có tác dụng — **không có bằng chứng, nên không đổi hành vi công cụ.** Việc resume làm debuggee
+chạy tiếp sau khi người dùng yêu cầu dừng; cái giá đó cần bằng chứng, không phải phỏng đoán.
+
+Giả thuyết vì sao crash biến mất (nêu là giả thuyết, chưa chứng minh): lỗi `dbg_start` được phát hiện
+trong lúc verify (xem dưới) từng làm phiên kẹt ở trạng thái debugging-không-process, và suite khi đó
+liên tục start/stop lên một engine hỏng trong khi cửa sổ Locals refresh trên bộ nhớ đã giải phóng.
+Sửa `dbg_start` đã loại bỏ vòng lặp đó.
+
+Vẫn giữ resume-trước-stop trong `Dbg.Reset()` của suite vì nó không tốn gì; comment ở đó nói rõ là
+biện pháp phòng ngừa chứ không phải đã chứng minh cần thiết.
+
+### Defect thứ tư, phát hiện trong lúc verify
+
+`dbg_start` trả về ngay khi engine nhận lệnh, trong khi `IsDebugging` đã true còn `Processes` vẫn
+rỗng. Một `dbg_stop` rơi vào cửa sổ đó không có gì để dừng và **làm kẹt phiên vĩnh viễn** ở trạng
+thái debugging-không-process. Trước đó tôi đã tưởng đây là test flaky và chỉ nâng timeout — sai.
+Sửa: `dbg_start` chờ tới khi thực sự có process, nên "started" nghĩa là đã start.
+
+---
 
 | # | Vấn đề | Bản chất | Mức |
 |---|---|---|---|
