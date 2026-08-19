@@ -7,3 +7,7 @@ _ReSharper*/
 *_wpftmp.csproj
 launchSettings.json
 .idea/
+
+# Integration-test fixture build output
+tests/fixture/*/bin/
+tests/fixture/*/obj/

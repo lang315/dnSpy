@@ -38,6 +38,17 @@ namespace dnSpy.MCP.Tools {
 		// so the 10s default in DbgAccess.Invoke is too aggressive here; give eval-based tools more room.
 		const int EvalTimeoutMs = 60000;
 
+		// dnSpy's own func-eval cap (DbgLanguage.DefaultFuncEvalTimeout) is one second, which is far
+		// too short for an agent calling a real method — it reports "Evaluation timed out" long before
+		// the marshalling timeout above matters. Cap below EvalTimeoutMs so a slow evaluation fails
+		// with the engine's own message rather than as a dispatcher timeout.
+		static readonly TimeSpan FuncEvalTimeout = TimeSpan.FromSeconds(30);
+
+		// Format numbers in decimal. Without this the output follows dnSpy's UI "hexadecimal display"
+		// toggle, so the same expression answers 7 or 0x00000007 depending on a setting the agent
+		// cannot see. A machine consumer needs one stable representation.
+		const DbgValueFormatterOptions ValueOptions = DbgValueFormatterOptions.Decimal;
+
 		const DbgStackFrameFormatterOptions FrameOptions =
 			DbgStackFrameFormatterOptions.ModuleNames |
 			DbgStackFrameFormatterOptions.ParameterTypes |
@@ -159,7 +170,7 @@ namespace dnSpy.MCP.Tools {
 					try {
 						var evalInfo = new DbgEvaluationInfo(context, frame, CancellationToken.None);
 						writer.Reset();
-						language.Formatter.FormatFrame(evalInfo, writer, FrameOptions, DbgValueFormatterOptions.None, null);
+						language.Formatter.FormatFrame(evalInfo, writer, FrameOptions, ValueOptions, null);
 						arr.Add(new JObject {
 							["index"] = i,
 							["frame"] = writer.Text,
@@ -187,7 +198,8 @@ namespace dnSpy.MCP.Tools {
 			var threadId = (ulong?)(long?)args["thread_id"];
 			return dbg.Invoke(() => {
 				var (frame, language) = ResolveFrame(threadId, frameIndex);
-				var context = language.CreateContext(frame, cancellationToken: CancellationToken.None);
+				var context = language.CreateContext(frame, funcEvalTimeout: FuncEvalTimeout,
+					cancellationToken: CancellationToken.None);
 				try {
 					var evalInfo = new DbgEvaluationInfo(context, frame, CancellationToken.None);
 					return body(evalInfo, language);
@@ -223,7 +235,7 @@ namespace dnSpy.MCP.Tools {
 				var value = result.Value!;
 				try {
 					var writer = new DbgStringBuilderTextWriter();
-					language.Formatter.FormatValue(evalInfo, writer, value, DbgValueFormatterOptions.None, null);
+					language.Formatter.FormatValue(evalInfo, writer, value, ValueOptions, null);
 					return Json(new JObject {
 						["expression"] = expression,
 						["value"] = writer.Text,
@@ -332,7 +344,7 @@ namespace dnSpy.MCP.Tools {
 
 		static string FormatValue(Contracts.Debugger.Evaluation.DbgValueNode node, DbgEvaluationInfo evalInfo, DbgStringBuilderTextWriter writer) {
 			writer.Reset();
-			node.FormatValue(evalInfo, writer, DbgValueFormatterOptions.None, null);
+			node.FormatValue(evalInfo, writer, ValueOptions, null);
 			return writer.Text;
 		}
 

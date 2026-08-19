@@ -1,6 +1,40 @@
 # dnSpy.MCP — Kế hoạch integration testing
 
 Ngày: 2026-08-19
+
+## Cập nhật: đã triển khai và chạy thật (2026-08-19)
+
+Kế hoạch đã thực hiện xong. **Tier 1: 71/71 xanh. Tier 2: 33/33 xanh** trên Windows 10 x64 với
+dnSpy build đầy đủ (net10.0-windows) và app mồi `dbgtest`.
+
+Kiểm chứng test có tác dụng: khôi phục `Server/McpServer.cs` về bản trước khi sửa review làm **đúng
+ba** test Tier 1 đỏ — chặn body chunked, cảnh báo thiếu token, và long-poll starvation. Hai fix còn
+lại (so sánh token hằng-thời-gian, strip tiền tố hex) là thuộc tính về timing/robustness mà test
+chức năng không phân biệt được; ghi nhận thẳng thay vì giả vờ đã phủ.
+
+**Chạy thật phát hiện thêm 2 defect của extension, đã sửa:**
+
+1. **Func-eval bị chặn ở 1 giây.** `InspectionTools` gọi `language.CreateContext(...)` mà không
+   truyền `funcEvalTimeout`, nên rơi vào `DbgLanguage.DefaultFuncEvalTimeout = 1s`. Mọi biểu thức
+   gọi method/property chậm hơn 1s trả "Evaluation timed out". Đây cũng là lý do fix timeout
+   dispatcher 60s (#3 của review) vô nghĩa với func-eval — cap của dnSpy bắn trước. Sửa: truyền 30s.
+2. **Số được format theo hệ hex.** `DbgValueFormatterOptions.None` nghĩa là theo mặc định của dnSpy,
+   mà mặc định là hexadecimal — `a + b` trả `0x00000008`. Tệ hơn, định dạng phụ thuộc một toggle UI
+   mà agent không nhìn thấy. Sửa: truyền `DbgValueFormatterOptions.Decimal` để output ổn định.
+
+**Hai cạm bẫy vận hành, đã xử lý trong harness:**
+
+- **dnSpy crash khi hủy process đang pause.** AV `0xC0000005` trong `dnlib` đọc PE image từ bộ nhớ
+  debuggee đã giải phóng, kích hoạt từ `ValueNodesVM.RecreateRootChildren_UI` — cửa sổ Locals của
+  chính dnSpy tự refresh khi call stack đổi. Không có frame nào của `dnSpy.MCP` trong stack, nhưng
+  agent điều khiển nhanh thì đua được với nó. `Dbg.Reset()` nay continue trước rồi mới stop.
+- **Suite xóa breakpoint thật của người dùng.** dnSpy lưu breakpoint vào `%APPDATA%\dnSpy\dnSpy.xml`
+  khi thoát sạch; suite gọi `bp_remove all=true` giữa các test. Bắt buộc chạy dnSpy với
+  `--settings-file <temp>`; `run-integration.ps1` đã làm vậy.
+
+Thực tế khác kế hoạch: test đặt ở `tests/` gốc repo, không phải `Extensions/dnSpy.MCP/tests/` — lồng
+project vào trong extension khiến glob `**/*.cs` của nó nuốt luôn file test vào assembly shipping.
+
 Bối cảnh: sau commit "Fix review findings in dnSpy.MCP" (7 lỗi từ review). Roadmap mục 19 còn treo:
 smoke test đang ở scratchpad, chưa có gì trong repo bảo vệ regression.
 
