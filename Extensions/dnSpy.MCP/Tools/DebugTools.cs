@@ -152,7 +152,28 @@ namespace dnSpy.MCP.Tools {
 
 			// Start is called directly (not on the dbg dispatcher) — it boots that dispatcher itself.
 			var err = Mgr.Start(options);
-			return err is null ? $"started debugging {Path.GetFileName(path)}" : throw new InvalidOperationException(err);
+			if (err is not null)
+				throw new InvalidOperationException(err);
+
+			// Start only means "the engine accepted the request": IsDebugging flips to true immediately
+			// while Processes is still empty. Returning here would hand back a success the caller cannot
+			// act on, and a dbg_stop landing in that window finds nothing to stop and wedges the session
+			// as debugging-with-no-processes, from which it never recovers. Wait for a real process so
+			// "started" means started.
+			if (!WaitForProcess(15000))
+				throw new InvalidOperationException(
+					$"the debug engine accepted {Path.GetFileName(path)} but no process appeared; the session may need dbg_stop");
+			return $"started debugging {Path.GetFileName(path)}";
+		}
+
+		bool WaitForProcess(int timeoutMs) {
+			var sw = Stopwatch.StartNew();
+			while (sw.ElapsedMilliseconds < timeoutMs) {
+				if (dbg.Invoke(() => Mgr.Processes.Length > 0))
+					return true;
+				Thread.Sleep(100);
+			}
+			return false;
 		}
 
 		static bool IsDotNetCore(string path, string? runtime) {

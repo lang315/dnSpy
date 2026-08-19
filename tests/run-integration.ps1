@@ -47,6 +47,25 @@ function Resolve-DnSpy {
     return $candidates[0]
 }
 
+# A dnSpy this script did not launch is the user's own session, running on their real
+# %APPDATA%\dnSpy\dnSpy.xml. The suite clears every breakpoint between tests and dnSpy saves
+# breakpoints back on a clean exit, so a run that found that instance first would delete the
+# breakpoints they set by hand. Refuse rather than gamble on which instance the port lands on.
+function Assert-NoRunningDnSpy {
+    $existing = @(Get-Process -Name 'dnSpy', 'dnSpy-x86' -ErrorAction SilentlyContinue)
+    if ($existing.Count -eq 0) { return }
+
+    $ids = ($existing | ForEach-Object { "$($_.ProcessName) (PID $($_.Id))" }) -join ', '
+    $lines = @(
+        "Refusing to start: dnSpy is already running - $ids."
+        'This suite clears all breakpoints, and a dnSpy you started yourself uses your real'
+        '%APPDATA%\dnSpy\dnSpy.xml, so the run would delete the breakpoints you set by hand.'
+        'Close it (including any instance left behind by a previous -KeepRunning) and re-run'
+        'this script, which launches its own dnSpy with --settings-file pointing at a temp file.'
+    )
+    throw ($lines -join [Environment]::NewLine)
+}
+
 # A free port keeps repeat and parallel runs from colliding, and proves DNSPY_MCP_PORT is honoured.
 function Get-FreePort {
     $probe = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, 0)
@@ -84,6 +103,10 @@ function Stop-Leftovers {
 }
 
 try {
+    # Before anything else, and before $started has anything in it: the teardown below must never
+    # be in a position to kill an instance this script did not start.
+    Assert-NoRunningDnSpy
+
     $exe = Resolve-DnSpy
     Write-Step "Using dnSpy at $exe"
 

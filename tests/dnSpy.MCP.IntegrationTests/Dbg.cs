@@ -37,6 +37,10 @@ namespace dnSpy.MCP.IntegrationTests {
 
 		/// <summary>Calls a tool and returns its text payload. Throws if the tool reported an error.</summary>
 		public static string Call(string tool, JObject? args = null) {
+			// Every request this suite sends to dnSpy leaves through here, so the isolation check
+			// cannot be ordered around — not by a test-class constructor, not by a new test that
+			// forgets to opt in. Nothing destructive can reach the wire ahead of it.
+			SafetyGate.Enforce();
 			var res = Rpc.Post(Url!, Rpc.CallTool(Interlocked.Increment(ref nextId), tool, args), Token);
 			if (res.Json["error"] is not null)
 				throw new InvalidOperationException($"{tool}: protocol error {res.Json["error"]}");
@@ -102,6 +106,9 @@ namespace dnSpy.MCP.IntegrationTests {
 		/// means the UI is not sitting on a frame when the process goes away.
 		/// </summary>
 		public static void Reset() {
+			// Stated again at the destructive entry point even though Call/TryCall already enforce it:
+			// this is the line that deletes breakpoints, so the guarantee should be readable here.
+			SafetyGate.Enforce();
 			TryCall("bp_remove", new JObject { ["all"] = true });
 			TryCall("mbp_remove", new JObject { ["all"] = true });
 			if (!IsDebugging)
@@ -120,6 +127,9 @@ namespace dnSpy.MCP.IntegrationTests {
 		}
 
 		public static void TryCall(string tool, JObject? args = null) {
+			// Enforced outside the catch: "best effort" applies to cleanup failures, never to a
+			// refusal to touch the user's real dnSpy profile.
+			SafetyGate.Enforce();
 			try { Call(tool, args); }
 			catch (Exception) { /* best-effort cleanup */ }
 		}
@@ -130,6 +140,9 @@ namespace dnSpy.MCP.IntegrationTests {
 				try {
 					if (condition())
 						return true;
+				}
+				catch (DbgUnsafeTargetException) {
+					throw; // a refusal is never transient, and must not be polled away
 				}
 				catch (Exception) {
 					// Transient while the engine is starting or tearing down.

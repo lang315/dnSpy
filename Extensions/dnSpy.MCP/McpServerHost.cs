@@ -21,6 +21,7 @@ using System;
 using System.Collections.Generic;
 using System.ComponentModel.Composition;
 using System.Diagnostics;
+using dnSpy.Contracts.App;
 using dnSpy.Contracts.Debugger;
 using dnSpy.Contracts.Debugger.Attach;
 using dnSpy.Contracts.Debugger.Breakpoints.Code;
@@ -84,6 +85,10 @@ namespace dnSpy.MCP {
 
 			try {
 				Log("starting MCP server");
+				// Authentication is on by default; TokenStore generates and persists a token on first
+				// run. Anchored to the settings file so --settings-file isolates the token too.
+				var auth = TokenStore.Resolve(AppDirectories.SettingsFilename, Log);
+				var port = GetPort();
 				var dbg = new DbgAccess(dbgManager.Value);
 				var tools = new List<ToolDef>();
 				tools.AddRange(new DebugTools(dbg, attachService).Create());
@@ -92,10 +97,13 @@ namespace dnSpy.MCP {
 				tools.AddRange(new MemoryTools(dbg).Create());
 				tools.AddRange(new ExceptionTools(dbg, exceptionService).Create());
 				tools.AddRange(new ModuleBreakpointTools(dbg, moduleBpService).Create());
+				// Counts the live list rather than a snapshot, so the reported total covers every tool
+				// including this one — the count is not knowable while the list is still being built.
+				tools.AddRange(new InfoTools(port, () => auth.Token is not null,
+					() => auth.Source,
+					() => tools.Count).Create());
 
-				// McpServer warns on Start() when it has no token — it is the thing that knows.
-				var authToken = Environment.GetEnvironmentVariable("DNSPY_MCP_TOKEN");
-				var srv = new McpServer(GetPort(), tools, Log, authToken);
+				var srv = new McpServer(port, tools, Log, auth.Token, auth.FilePath);
 				srv.Start();
 				server = srv;
 				// Push a notification to SSE clients whenever a process pauses (breakpoint/step/break).

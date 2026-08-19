@@ -78,7 +78,8 @@ Kiểm tra server sống:
 
 ```powershell
 curl.exe http://127.0.0.1:27115/mcp
-# → "dnSpy MCP server"
+# → 401 kèm đường dẫn file token. Nhận được 401 tức server đã sống;
+#   thêm header token thì ra "dnSpy MCP server".
 ```
 
 ---
@@ -88,7 +89,9 @@ curl.exe http://127.0.0.1:27115/mcp
 ### Claude Code
 
 ```sh
-claude mcp add --transport http dnspy http://127.0.0.1:27115/mcp
+$token = Get-Content "$env:APPDATA\dnSpy\mcp-token.txt"
+claude mcp add --transport http dnspy http://127.0.0.1:27115/mcp `
+  --header "Authorization: Bearer $token"
 ```
 
 ### File cấu hình MCP (chung)
@@ -100,8 +103,6 @@ claude mcp add --transport http dnspy http://127.0.0.1:27115/mcp
   }
 }
 ```
-
-### Nếu bật token (xem [mục 8](#8-bảo-mật))
 
 ```json
 {
@@ -168,7 +169,7 @@ Kết quả trả về là JSON dạng text. Lỗi trả về dưới dạng MCP
 | `dbg_modules` | — | Liệt kê module đã nạp (tên, đường dẫn, địa chỉ, kích thước, dynamic/in-memory). |
 | `dbg_callstack` | `thread_id`, `max_frames` | Call stack của thread paused (mặc định thread hiện tại, tối đa 200 frame, giới hạn 1000). |
 | `dbg_locals` | `frame_index`, `thread_id` | Biến local + tham số của 1 frame (mặc định frame 0 = trên cùng). |
-| `dbg_variables` | `kind` = `autos`\|`returns`\|`statics`\|`exceptions`, `frame_index`, `thread_id` | Liệt kê nhóm biến khác. |
+| `dbg_variables` | `kind` = `returns`\|`statics`\|`exceptions`, `frame_index`, `thread_id` | Liệt kê nhóm biến khác. `autos` chưa được engine .NET của dnSpy hiện thực — tool báo lỗi rõ thay vì trả về giá trị giả. |
 | `dbg_eval` | `expression` (bắt buộc), `frame_index`, `thread_id` | Đánh giá biểu thức C#/VB trong ngữ cảnh 1 frame. |
 | `dbg_expand` | `expression` (bắt buộc), `frame_index`, `max_children`, `thread_id` | Liệt kê thành viên con (field/phần tử) của 1 biểu thức — drill vào object/mảng. |
 | `dbg_set_variable` | `target`, `value` (bắt buộc), `frame_index`, `thread_id` | Gán giá trị mới cho biến/biểu thức. |
@@ -226,16 +227,34 @@ Với agent (Claude Code), bạn chỉ cần mô tả bằng ngôn ngữ tự nh
 
 Các tool này **thực thi mã** (khởi động tiến trình, đánh giá biểu thức), nên endpoint được bảo vệ:
 
+- **Token bắt buộc, bật sẵn** — lần chạy đầu tiên server tự sinh token và lưu vào `mcp-token.txt` **đặt cạnh file settings của dnSpy**. Token giữ nguyên qua các lần khởi động nên bạn chỉ cấu hình client một lần. Mọi request phải có `Authorization: Bearer <token>`.
 - **Chỉ loopback** — bind `127.0.0.1`, không máy từ xa nào truy cập trực tiếp được.
 - **Chống CSRF / DNS-rebinding** — request mang header `Origin` của trình duyệt, hoặc header `Host` không phải loopback, đều bị từ chối (403). Ngăn một trang web độc bạn vô tình mở điều khiển được debugger. Chỉ phục vụ đường dẫn `/mcp`, body giới hạn 4 MB.
-- **Token tùy chọn** — đặt `DNSPY_MCP_TOKEN` trước khi mở dnSpy để bắt buộc mọi request phải có `Authorization: Bearer <token>`. Dùng khi muốn chặn cả tiến trình cục bộ khác trên máy.
+
+Lấy token:
 
 ```powershell
-$env:DNSPY_MCP_TOKEN = "chuoi-bi-mat-ngau-nhien"
+Get-Content "$env:APPDATA\dnSpy\mcp-token.txt"
+```
+
+Quên token thì không cần đi tra tài liệu — phản hồi `401` tự ghi rõ đường dẫn file token.
+
+Muốn tự đặt token thay vì dùng token sinh tự động:
+
+```powershell
+$env:DNSPY_MCP_TOKEN = "chuoi-bi-mat-cua-ban"
 .\dnSpy.exe
 ```
 
-Lưu ý: cơ chế trên **không** cô lập bạn khỏi phần mềm khác chạy dưới cùng user của bạn (trừ khi bật token). Hãy coi `dbg_start` / `dbg_eval` là công cụ thực thi mã và chỉ kết nối MCP client mà bạn tin tưởng.
+Tắt hẳn xác thực (chỉ khi bạn hiểu rõ hệ quả — mọi tiến trình chạy dưới user của bạn sẽ toàn quyền điều khiển debugger):
+
+```powershell
+$env:DNSPY_MCP_NO_AUTH = "1"
+```
+
+Token nằm cạnh file settings chứ không ở đường dẫn cố định, nên nó đi theo `--settings-file`: một dnSpy chạy tạm sẽ có token riêng và không đọc được token thật.
+
+Gọi `dnspy_info` bất cứ lúc nào để biết mình đang nối tới dnSpy nào, xác thực có bật không và nó đang dùng file settings nào.
 
 ---
 
@@ -276,14 +295,14 @@ Rồi trỏ MCP client tới `http://127.0.0.1:27115/mcp`. Guard Host cho qua v�
 
 > **Wine/CrossOver:** dnSpy có `WineFixes.cs` nên giao diện chạy được trên Wine, nhưng debug engine CorDebug cần API Windows thật — Wine không cung cấp đủ, nên tính năng debug không đáng tin. Khuyến nghị dùng máy ảo Windows thật.
 
-> **Lưu ý Windows ARM64 (Parallels trên Apple Silicon):** đã kiểm thực tế — server, 32 tool, `bp_add_method` (bind + hit), `dbg_attach`, break/wait, threads/modules/callstack chạy đúng. Nhưng `dbg_start` (CorDebug **launch**) không tạo được process, và `dbg_locals`/`dbg_eval`/`dbg_set_variable` trả "Internal debugger error" — đây là giới hạn func-eval/launch của CorDebug trên ARM64, không phải lỗi extension. Trên ARM64 hãy **attach** vào tiến trình đang chạy thay vì launch. Để dùng đầy đủ (launch + eval), chạy Windows **x64** (RID chính thức của dnSpy là win-x86/win-x64).
+> **Lưu ý Windows ARM64 (Parallels trên Apple Silicon):** đã kiểm thực tế — server, đầy đủ tool, `bp_add_method` (bind + hit), `dbg_attach`, break/wait, threads/modules/callstack chạy đúng. Nhưng `dbg_start` (CorDebug **launch**) không tạo được process, và `dbg_locals`/`dbg_eval`/`dbg_set_variable` trả "Internal debugger error" — đây là giới hạn func-eval/launch của CorDebug trên ARM64, không phải lỗi extension. Trên ARM64 hãy **attach** vào tiến trình đang chạy thay vì launch. Để dùng đầy đủ (launch + eval), chạy Windows **x64** (RID chính thức của dnSpy là win-x86/win-x64).
 >
 > Khi cài SDK vào thư mục riêng (vd `C:\dotnet10`), đặt `DOTNET_ROOT` trỏ tới đó để dnSpy.exe (apphost) tìm được .NET Desktop runtime; và dành cổng cho HttpListener nếu chạy non-admin: `netsh http add urlacl url=http://127.0.0.1:27115/ user=Everyone`.
 
 > **Windows x64 — đã kiểm thực tế đầy đủ (2026-08-15):** trên Windows 10 x64, **toàn bộ luồng debug lõi chạy thật** — `dbg_start` (launch), `dbg_attach`, `bp_add_method` bind+hit, `dbg_step`, `dbg_callstack`, `dbg_locals`, `dbg_eval` (kể cả gọi method: `System.Math.Max(a,b)`), `dbg_set_variable`, `dbg_set_next_statement`. Các "Internal debugger error" thấy ở ARM64 **không xuất hiện** trên x64. Vài lưu ý dùng:
 > - `dbg_start` nhận cả `.exe` (apphost) lẫn `.dll`; nếu truyền apphost `.exe` có `.dll`+`.runtimeconfig.json` cạnh bên, tool tự debug thẳng `.dll` để breakpoint đặt trước khi launch bind được.
 > - Debuggee phải cùng bitness với dnSpy (dnSpy x64 ⇒ target x64).
-> - `dbg_variables kind=autos` trả `NYI` (provider autos của dnSpy chưa implement) — dùng `dbg_locals` hoặc `kind=statics/returns/exceptions`.
+> - `dbg_variables kind=autos` báo lỗi "not implemented" (provider autos của dnSpy là stub) — dùng `dbg_locals` hoặc `kind=statics/returns/exceptions`.
 
 ---
 
@@ -295,6 +314,6 @@ Rồi trỏ MCP client tới `http://127.0.0.1:27115/mcp`. Guard Host cho qua v�
 | Server không khởi động, log `failed to start MCP server` | Cổng đang bị chiếm. Đặt `DNSPY_MCP_PORT` sang cổng khác rồi mở lại dnSpy. |
 | Tool trả về `not debugging` / `no paused thread; break first` | Tool kiểm tra yêu cầu tiến trình đang paused. Gọi `dbg_break` hoặc chờ trúng breakpoint trước. |
 | `403 forbidden` | Client gửi header `Origin` hoặc `Host` không phải loopback. Dùng MCP client trực tiếp (không qua trình duyệt); nếu tunnel, đảm bảo trỏ tới `127.0.0.1`. |
-| `401 unauthorized` | Đã bật `DNSPY_MCP_TOKEN` nhưng client chưa gửi `Authorization: Bearer`. Thêm header token vào cấu hình client. |
+| `401 unauthorized` | Client chưa gửi `Authorization: Bearer`, hoặc gửi sai token. Chính thân phản hồi 401 ghi đường dẫn file token — đọc file đó rồi thêm header vào cấu hình client. |
 | `dbg_start` chọn sai runtime | File self-contained không có `.runtimeconfig.json`: truyền `runtime` = `net` hoặc `netfx` tường minh. |
 | Log của server ở đâu | Ghi qua `Debug.WriteLine` (tiền tố `[dnSpy.MCP]`) — xem bằng DebugView hoặc khi chạy dnSpy dưới debugger. |
