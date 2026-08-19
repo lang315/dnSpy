@@ -72,14 +72,37 @@ namespace dnSpy.MCP.Tests {
 			Assert.Equal(HttpStatusCode.OK, res.Status);
 		}
 
-		// The endpoint being open to every local process is a deliberate trade-off, but it must be
-		// stated out loud rather than silently assumed.
+		// Authentication is on by default now, so a server with no token means somebody opted out —
+		// which must never happen quietly.
 		[Fact]
 		public void Starting_without_a_token_is_not_silent() {
 			using var srv = new McpTestServer();
 
-			Assert.True(srv.LoggedContaining("DNSPY_MCP_TOKEN is not set"),
+			Assert.True(srv.LoggedContaining("WITHOUT authentication"),
 				"expected the server to warn that the endpoint is unauthenticated");
+		}
+
+		// A 401 that only says "no" leaves the caller stuck; the token is on their own disk.
+		[Fact]
+		public void An_unauthorized_response_says_where_to_find_the_token() {
+			var tokenFile = @"C:\somewhere\mcp-token.txt";
+			using var srv = new McpTestServer(Token, tokenFilePath: tokenFile);
+
+			var res = Rpc.Post(srv.McpUrl, Rpc.Request(1, "initialize"));
+
+			Assert.Equal(HttpStatusCode.Unauthorized, res.Status);
+			Assert.Contains(tokenFile, res.Body);
+			Assert.Contains("Bearer", res.Body);
+		}
+
+		[Fact]
+		public void An_unauthorized_response_points_at_the_log_when_the_token_never_reached_disk() {
+			using var srv = new McpTestServer(Token);
+
+			var res = Rpc.Post(srv.McpUrl, Rpc.Request(1, "initialize"));
+
+			Assert.Equal(HttpStatusCode.Unauthorized, res.Status);
+			Assert.Contains("dnSpy.MCP.log", res.Body);
 		}
 
 		[Fact]

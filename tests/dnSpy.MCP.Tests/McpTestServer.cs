@@ -27,9 +27,10 @@ namespace dnSpy.MCP.Tests {
 		/// <summary>How many stub_slow handlers are currently blocked inside the server.</summary>
 		public int InFlightSlowCalls => Volatile.Read(ref inFlightSlowCalls);
 
-		public McpTestServer(string? authToken = null, IReadOnlyList<ToolDef>? tools = null) {
+		public McpTestServer(string? authToken = null, IReadOnlyList<ToolDef>? tools = null,
+			string? tokenFilePath = null) {
 			Port = FreePort();
-			server = new McpServer(Port, tools ?? StubTools(), logs.Enqueue, authToken);
+			server = new McpServer(Port, tools ?? StubTools(), logs.Enqueue, authToken, tokenFilePath);
 			server.Start();
 		}
 

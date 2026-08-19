@@ -18,16 +18,30 @@ MCP client  ──HTTP JSON-RPC──►  dnSpy.exe / dnSpy.MCP.x.dll  ──►
 
 ### Security model
 
-The tools execute code (launch processes, evaluate expressions), so the endpoint is guarded:
+The tools execute code — they launch processes, patch memory and evaluate expressions inside a
+debuggee — so an open port here is local code execution. The endpoint is guarded:
 
+- **Bearer token, on by default.** A token is generated on first run and stored in `mcp-token.txt`
+  next to dnSpy's settings file, so it survives restarts and you configure your client once. Every
+  request must send `Authorization: Bearer <token>`. Override it with `DNSPY_MCP_TOKEN`, or disable
+  authentication entirely with `DNSPY_MCP_NO_AUTH=1` (logged loudly).
+  A 401 response tells you where the token file is.
 - **Loopback only** — no remote host can reach it.
-- **Anti-CSRF / anti-DNS-rebinding** — requests carrying a browser `Origin` header, or a non-loopback `Host` header, are rejected (403). This stops a malicious web page you happen to visit from driving the debugger. It does *not* isolate you from other local software running as your user — treat this like running any local debugger.
-- **Optional bearer token** — set `DNSPY_MCP_TOKEN` before launching dnSpy to require `Authorization: Bearer <token>` on every request (defeats hostile local processes too). Configure the same token in your MCP client.
+- **Anti-CSRF / anti-DNS-rebinding** — requests carrying a browser `Origin` header, or a non-loopback
+  `Host` header, are rejected (403). This stops a malicious web page you happen to visit from driving
+  the debugger.
+
+The token file lives beside the settings file rather than at a fixed path so that it follows
+`--settings-file`: a throwaway dnSpy gets its own token and cannot read the real one.
 
 ## Connecting from Claude Code
 
-```
-claude mcp add --transport http dnspy http://127.0.0.1:27115/mcp
+Read the token dnSpy generated, then register the server with it:
+
+```powershell
+$token = Get-Content "$env:APPDATA\dnSpy\mcp-token.txt"
+claude mcp add --transport http dnspy http://127.0.0.1:27115/mcp `
+  --header "Authorization: Bearer $token"
 ```
 
 Or add to your MCP client config:
@@ -35,12 +49,23 @@ Or add to your MCP client config:
 ```json
 {
   "mcpServers": {
-    "dnspy": { "type": "http", "url": "http://127.0.0.1:27115/mcp" }
+    "dnspy": {
+      "type": "http",
+      "url": "http://127.0.0.1:27115/mcp",
+      "headers": { "Authorization": "Bearer <token>" }
+    }
   }
 }
 ```
 
-## Tools (32)
+Call `dnspy_info` at any time to check which instance you reached, whether authentication is on and
+which settings file it is using.
+
+## Tools (33)
+
+Endpoint:
+- `dnspy_info` — which dnSpy this is, its version and port, whether a token is required and where it
+  came from, and the settings file in use
 
 Session control:
 - `dbg_status` — is-debugging / running / process list
@@ -64,7 +89,8 @@ Inspection (require a paused process):
 - `dbg_threads`, `dbg_modules`
 - `dbg_callstack` — `thread_id?`, `max_frames?`
 - `dbg_locals` — `frame_index?`, `thread_id?`
-- `dbg_variables` — `autos` / `returns` / `statics` / `exceptions`
+- `dbg_variables` — `returns` / `statics` / `exceptions` (dnSpy's .NET engine does not implement
+  `autos`; the tool says so rather than returning its placeholder)
 - `dbg_eval` — C#/VB `expression` in a frame's context
 - `dbg_expand` — list an expression's child members (drill into objects/arrays)
 - `dbg_set_variable` — assign a new value to a variable

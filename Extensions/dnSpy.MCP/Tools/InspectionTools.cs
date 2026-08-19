@@ -114,9 +114,10 @@ namespace dnSpy.MCP.Tools {
 				Expand);
 
 			yield return new ToolDef("dbg_variables",
-				"List a category of variables on the paused thread: autos, returns (return values), statics (static fields), or exceptions.",
+				"List a category of variables on the paused thread: returns (return values), statics (static fields), or exceptions. " +
+				"autos is not implemented by dnSpy's .NET engine and always fails — use dbg_locals instead.",
 				Schema.Object(
-					("kind", Schema.Str("autos | returns | statics | exceptions"), true),
+					("kind", Schema.Str("returns | statics | exceptions (autos is unsupported on the .NET engine)"), true),
 					("frame_index", Schema.Int("Frame index, 0 = top (default 0)"), false),
 					("thread_id", Schema.Int("Native thread id; defaults to the current thread"), false)),
 				Variables);
@@ -290,8 +291,11 @@ namespace dnSpy.MCP.Tools {
 					_ => throw new ArgumentException("'kind' must be autos, returns, statics, or exceptions"),
 				};
 				var writer = new DbgStringBuilderTextWriter();
+				var nodes = provider.GetNodes(evalInfo, DbgValueNodeEvaluationOptions.None);
+				if (kind == "autos" && IsNotImplementedStub(nodes, evalInfo, writer))
+					throw new InvalidOperationException("autos is not implemented by dnSpy's .NET engine; use dbg_locals instead");
 				var arr = new JArray();
-				foreach (var node in provider.GetNodes(evalInfo, DbgValueNodeEvaluationOptions.None)) {
+				foreach (var node in nodes) {
 					arr.Add(new JObject {
 						["name"] = FormatName(node, evalInfo, writer),
 						["value"] = node.HasError ? node.ErrorMessage : FormatValue(node, evalInfo, writer),
@@ -300,6 +304,17 @@ namespace dnSpy.MCP.Tools {
 				return Json(arr);
 			});
 		}
+
+		// dnSpy's .NET autos provider (DbgEngineAutosProviderImpl) is a stub: instead of failing it hands
+		// back one error node named "Error" carrying the message "NYI", which serialises as a plausible
+		// single-entry variable list and leads a caller to reason from a non-answer. Matching on that
+		// sentinel is brittle, so demand the whole shape — exactly one node, it is an error node, and both
+		// strings match — and never mistake a real variable for it. The day dnSpy implements the provider
+		// this stops matching and autos simply works again; the integration test guarding it fails then,
+		// which is the signal to delete this check.
+		static bool IsNotImplementedStub(Contracts.Debugger.Evaluation.DbgValueNode[] nodes, DbgEvaluationInfo evalInfo, DbgStringBuilderTextWriter writer) =>
+			nodes.Length == 1 && nodes[0].HasError && nodes[0].ErrorMessage == "NYI" &&
+			FormatName(nodes[0], evalInfo, writer) == "Error";
 
 		string SetVariable(JObject args) {
 			var target = (string?)args["target"] ?? throw new ArgumentException("'target' is required");

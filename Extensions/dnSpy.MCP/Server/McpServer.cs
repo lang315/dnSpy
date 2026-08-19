@@ -50,6 +50,7 @@ namespace dnSpy.MCP.Server {
 		readonly IReadOnlyList<ToolDef> toolList;
 		readonly Action<string> log;
 		readonly string? authToken;
+		readonly string? tokenFilePath;
 		readonly ConcurrentDictionary<Guid, HttpListenerResponse> sseClients = new();
 		readonly ConcurrentQueue<byte[]> outbound = new();
 		readonly AutoResetEvent outboundSignal = new(false);
@@ -61,9 +62,13 @@ namespace dnSpy.MCP.Server {
 		public int Port { get; }
 
 		/// <param name="authToken">If non-null, requests must send <c>Authorization: Bearer &lt;token&gt;</c>.</param>
-		public McpServer(int port, IReadOnlyList<ToolDef> tools, Action<string> log, string? authToken = null) {
+		/// <param name="tokenFilePath">Where the token can be read, quoted back in the 401 so a caller
+		/// finds it exactly when it is needed. Null if the token never reached disk.</param>
+		public McpServer(int port, IReadOnlyList<ToolDef> tools, Action<string> log, string? authToken = null,
+			string? tokenFilePath = null) {
 			Port = port;
 			this.log = log;
+			this.tokenFilePath = tokenFilePath;
 			this.authToken = string.IsNullOrEmpty(authToken) ? null : authToken;
 			toolList = tools;
 			var map = new Dictionary<string, ToolDef>(StringComparer.Ordinal);
@@ -77,8 +82,11 @@ namespace dnSpy.MCP.Server {
 		public void Start() {
 			listener.Start();
 			running = true;
+			// TokenStore normally hands us a token, so reaching here means someone opted out. Say so at
+			// this level too: the server is what knows, and a host that forgot to resolve a token would
+			// otherwise start open in silence.
 			if (authToken is null)
-				log("warning: DNSPY_MCP_TOKEN is not set — the endpoint is loopback-only but unauthenticated, so any local process running as you can drive the debugger. Set DNSPY_MCP_TOKEN to require a bearer token.");
+				log("warning: running WITHOUT authentication — the endpoint is loopback-only, but any local process running as you can drive the debugger.");
 			acceptThread = new Thread(AcceptLoop) { IsBackground = true, Name = "dnSpy.MCP" };
 			acceptThread.Start();
 			senderThread = new Thread(SenderLoop) { IsBackground = true, Name = "dnSpy.MCP.tx" };
@@ -200,7 +208,7 @@ namespace dnSpy.MCP.Server {
 				return;
 			}
 			if (!IsAuthorized(req)) {
-				WriteText(ctx, 401, "text/plain", "unauthorized");
+				WriteText(ctx, 401, "text/plain", UnauthorizedMessage());
 				return;
 			}
 
@@ -358,6 +366,16 @@ namespace dnSpy.MCP.Server {
 
 		bool IsLoopbackHost(string? host) =>
 			host == $"127.0.0.1:{Port}" || host == $"localhost:{Port}" || host == $"[::1]:{Port}";
+
+		// Naming the token file here is the difference between a dead end and a fix. It costs nothing:
+		// only a loopback caller ever sees this, and anyone who can read that file already has the
+		// user's own privileges.
+		string UnauthorizedMessage() {
+			var how = "unauthorized — send: Authorization: Bearer <token>";
+			if (tokenFilePath is not null)
+				return $"{how}{Environment.NewLine}token file: {tokenFilePath}";
+			return $"{how}{Environment.NewLine}the token was not written to disk; see dnSpy.MCP.log in your temp directory";
+		}
 
 		bool IsAuthorized(HttpListenerRequest req) {
 			if (authToken is null)

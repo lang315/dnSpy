@@ -70,15 +70,15 @@ namespace dnSpy.MCP.IntegrationTests {
 			Assert.NotEmpty(statics);
 		}
 
-		// dnSpy's autos provider is not implemented and answers "NYI". This is a dnSpy limitation, not
-		// an extension defect — asserted so the suite notices if dnSpy ever starts supporting it.
+		// dnSpy's autos provider is not implemented and answers "NYI" instead of failing, so the tool
+		// turns that non-answer into an error rather than let a caller reason from it. If dnSpy ever
+		// implements the provider the call succeeds and this fails — the signal to drop the workaround.
 		[DbgFact]
-		public void Autos_is_still_unimplemented_by_dnSpy() {
-			var autos = Dbg.CallArray("dbg_variables", new JObject { ["kind"] = "autos" });
+		public void Autos_is_rejected_because_dnSpy_does_not_implement_it() {
+			var error = Dbg.CallExpectingError("dbg_variables", new JObject { ["kind"] = "autos" });
 
-			var text = autos.ToString();
-			Assert.True(text.Contains("NYI"),
-				"dnSpy now implements the autos provider — drop this expectation and assert real values instead");
+			Assert.Contains("not implemented", error, StringComparison.OrdinalIgnoreCase);
+			Assert.Contains("dbg_locals", error, StringComparison.Ordinal);
 		}
 
 		[DbgFact]
