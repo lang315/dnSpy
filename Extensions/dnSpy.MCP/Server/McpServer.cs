@@ -77,6 +77,8 @@ namespace dnSpy.MCP.Server {
 		public void Start() {
 			listener.Start();
 			running = true;
+			if (authToken is null)
+				log("warning: DNSPY_MCP_TOKEN is not set — the endpoint is loopback-only but unauthenticated, so any local process running as you can drive the debugger. Set DNSPY_MCP_TOKEN to require a bearer token.");
 			acceptThread = new Thread(AcceptLoop) { IsBackground = true, Name = "dnSpy.MCP" };
 			acceptThread.Start();
 			senderThread = new Thread(SenderLoop) { IsBackground = true, Name = "dnSpy.MCP.tx" };

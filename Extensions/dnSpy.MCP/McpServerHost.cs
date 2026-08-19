@@ -93,9 +93,8 @@ namespace dnSpy.MCP {
 				tools.AddRange(new ExceptionTools(dbg, exceptionService).Create());
 				tools.AddRange(new ModuleBreakpointTools(dbg, moduleBpService).Create());
 
+				// McpServer warns on Start() when it has no token — it is the thing that knows.
 				var authToken = Environment.GetEnvironmentVariable("DNSPY_MCP_TOKEN");
-				if (string.IsNullOrEmpty(authToken))
-					Log("warning: DNSPY_MCP_TOKEN is not set — the endpoint is loopback-only but unauthenticated, so any local process running as you can drive the debugger. Set DNSPY_MCP_TOKEN to require a bearer token.");
 				var srv = new McpServer(GetPort(), tools, Log, authToken);
 				srv.Start();
 				server = srv;
