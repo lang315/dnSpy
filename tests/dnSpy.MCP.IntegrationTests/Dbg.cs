@@ -23,6 +23,11 @@ namespace dnSpy.MCP.IntegrationTests {
 	static class Dbg {
 		static int nextId = 1;
 
+		// Enforce the isolation check on the wire itself, not just in Dbg.Call: a future test that talks
+		// to Rpc or SseStream directly must still be unable to reach a non-isolated dnSpy. Rpc's guard is
+		// a per-assembly static, so this only arms the integration project's copy.
+		static Dbg() => Rpc.RequestGuard = _ => SafetyGate.Enforce();
+
 		public static string? Url => Environment.GetEnvironmentVariable("DNSPY_MCP_TEST_URL");
 		public static string? Token => Environment.GetEnvironmentVariable("DNSPY_MCP_TEST_TOKEN");
 		public static bool Configured => !string.IsNullOrEmpty(Url);

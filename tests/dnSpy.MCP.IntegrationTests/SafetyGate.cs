@@ -35,16 +35,25 @@ namespace dnSpy.MCP.IntegrationTests {
 		static bool probed;
 		static string? refusal; // null means "verified isolated"
 
+		// The probe below issues its own request (a read-only dnspy_info), which now flows through the
+		// same Rpc guard that calls Enforce. Suppress the guard for the duration of the probe on this
+		// thread so it does not recurse into itself.
+		[ThreadStatic] static bool inProbe;
+
 		/// <summary>
 		/// Blocks the caller unless the target dnSpy was verified isolated. The probe itself runs at
 		/// most once per process; every later call is answered from the cached verdict, so this is
 		/// cheap enough to sit in front of every single request.
 		/// </summary>
 		public static void Enforce() {
+			if (inProbe)
+				return;
 			lock (gate) {
 				if (!probed) {
 					probed = true;
-					refusal = Probe();
+					inProbe = true;
+					try { refusal = Probe(); }
+					finally { inProbe = false; }
 					if (refusal is not null) {
 						// xUnit attributes the failure to whichever test ran first, which buries the
 						// reason. Print it once where a human scanning the run output will see it.

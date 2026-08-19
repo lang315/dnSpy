@@ -42,6 +42,14 @@ Toàn bộ truy cập vào debugger được marshal về đúng luồng (thread
 - **Windows** — dnSpy là ứng dụng WPF, debug engine dùng CorDebug (API của Windows). Server chỉ chạy trên Windows. (Client MCP thì chạy ở đâu cũng được — xem [mục 9](#9-dùng-từ-macos--linux).)
 - **.NET 10 SDK** để build (repo nhắm `net48` và `net10.0-windows`).
 - dnSpy đã build đầy đủ (xem `README.md` gốc của repo và `CLAUDE.md`).
+- **Bitness phải khớp với target.** CorDebug debug in-process theo bitness: dnSpy x64 chỉ debug được target **x64**, dnSpy x86 chỉ debug được target **x86**. Rất nhiều app .NET Framework là **x86 (32-bit)** — muốn debug chúng, dùng bản dnSpy x86 (xem dưới). Không chắc bitness của target thì `dnspy_info` trên bản đang chạy + `dbg_status` sau khi launch (trường `bitness`) sẽ cho biết.
+
+Build bản x86 khi cần debug target 32-bit:
+
+```powershell
+./build.ps1 -buildtfm net-x86 -NoMsbuild
+# → dnSpy\dnSpy\bin\Release\net10.0-windows\win-x86\publish\dnSpy.exe (self-contained, kèm extension MCP)
+```
 
 ---
 
