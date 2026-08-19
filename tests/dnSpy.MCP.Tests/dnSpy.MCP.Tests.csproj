@@ -1,0 +1,32 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+      Lives outside Extensions/ on purpose: nesting it under Extensions\dnSpy.MCP\ would make the
+      extension's own default **\*.cs glob compile the tests into the shipping assembly.
+
+      Deliberately does NOT import DnSpyCommon.props either — that multi-targets net48 +
+      net10.0-windows and redirects OutputPath into dnSpy's bin folder, neither of which suits a test
+      assembly. The one thing it must share with the extension is the strong-name key, so the
+      InternalsVisibleTo grant matches.
+  -->
+  <PropertyGroup>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <IsPackable>false</IsPackable>
+    <SignAssembly>True</SignAssembly>
+    <AssemblyOriginatorKeyFile>..\..\dnSpy.snk</AssemblyOriginatorKeyFile>
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\Extensions\dnSpy.MCP\dnSpy.MCP.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.12.0" />
+    <PackageReference Include="xunit" Version="2.9.2" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2" />
+  </ItemGroup>
+
+</Project>
