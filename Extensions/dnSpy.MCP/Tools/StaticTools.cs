@@ -97,6 +97,24 @@ namespace dnSpy.MCP.Tools {
 					("scope", Schema.Str("'module' (default, the target's module) or 'open' (every assembly open in dnSpy)"), false),
 					("max", Schema.Int("Maximum callers to return (default 200)"), false)),
 				FindReferences, readOnly: true);
+
+			yield return new ToolDef("find_implementations",
+				"Find the methods that override or implement a given virtual, abstract or interface method — the forward direction of the type hierarchy, complementing find_references. Identify the target by fully-qualified name (all overloads) or metadata token.",
+				Schema.Object(
+					("module", Schema.Str("Module file path (of the target), or file name if open in dnSpy"), true),
+					("method", Schema.Str("Fully-qualified target method, e.g. 'MyApp.IHandler.Handle'"), false),
+					("token", Schema.Str("Metadata token of the target method, hex or decimal"), false),
+					("scope", Schema.Str("'module' (default, the target's module) or 'open' (every assembly open in dnSpy)"), false),
+					("max", Schema.Int("Maximum implementations to return (default 200)"), false)),
+				FindImplementations, readOnly: true);
+
+			yield return new ToolDef("extract_iocs",
+				"Extract indicators of compromise from an assembly by pure static reading: URLs, IPs, registry keys, file paths and e-mail addresses in string literals, plus native imports (P/Invoke), each tied to the method it appears in. For triage and malware-analysis reporting — nothing is executed.",
+				Schema.Object(
+					("module", Schema.Str("Module file path, or file name if already open in dnSpy"), true),
+					("categories", Schema.Str("Comma-separated subset of: url, ip, registry, path, email, pinvoke, base64 (default: all but base64)"), false),
+					("max", Schema.Int("Maximum indicators to return (default 500)"), false)),
+				ExtractIocs, readOnly: true);
 		}
 
 		string Decompile(JObject args) {
@@ -333,6 +351,250 @@ namespace dnSpy.MCP.Tools {
 
 		static bool IsCall(Code code) =>
 			code is Code.Call or Code.Callvirt or Code.Newobj or Code.Ldftn or Code.Ldvirtftn;
+
+		string FindImplementations(JObject args) {
+			var module = ReqStr(args, "module");
+			var method = (string?)args["method"];
+			var token = (string?)args["token"];
+			var scope = ((string?)args["scope"] ?? "module").ToLowerInvariant();
+			var max = Clamp((int?)args["max"] ?? 200, 1, MaxListItems);
+
+			lock (metadataLock) {
+				var mod = MetadataResolver.ResolveModule(documentService.Value, module);
+				MethodDef[] targets;
+				if (token is not null)
+					targets = new[] { ResolveToken(mod, token) as MethodDef
+						?? throw new InvalidOperationException("token does not resolve to a method") };
+				else if (!string.IsNullOrEmpty(method))
+					targets = MetadataResolver.ResolveMethods(mod, method!);
+				else
+					throw new ArgumentException("provide 'method' or 'token'");
+
+				var modules = scope == "open"
+					? documentService.Value.GetDocuments().Select(d => d.ModuleDef).OfType<ModuleDef>().Distinct().ToList()
+					: new List<ModuleDef> { mod };
+
+				var impls = new JArray();
+				var seen = new HashSet<string>();
+				long scannedTypes = 0;
+				foreach (var type in modules.SelectMany(m => m.GetTypes())) {
+					scannedTypes++;
+					foreach (var target in targets) {
+						var (impl, kind) = MatchImplementation(type, target);
+						if (impl is null)
+							continue;
+						if (!seen.Add(impl.MDToken.Raw + "@" + (impl.Module?.Location ?? "")))
+							continue;
+						impls.Add(new JObject {
+							["type"] = type.FullName,
+							["method"] = impl.FullName,
+							["token"] = Token(impl.MDToken),
+							["kind"] = kind,
+							["implements"] = target.FullName,
+						});
+						if (impls.Count >= max) break;
+					}
+					if (impls.Count >= max) break;
+				}
+				return Json(new JObject {
+					["target"] = string.Join(", ", targets.Select(t => t.FullName)),
+					["targetKind"] = TargetOverrideKind(targets[0]),
+					["scope"] = scope,
+					["scannedTypes"] = scannedTypes,
+					["implementations"] = impls,
+				});
+			}
+		}
+
+		// Mirrors dnSpy's own analyzer: InterfaceMethodImplementedByNode for interface methods and
+		// MethodOverridesNode ("Overridden By") for virtual/abstract class methods. Returns the one
+		// implementing/overriding method in `type` and how it relates to `target`, or null.
+		static (MethodDef? method, string kind) MatchImplementation(TypeDef type, MethodDef target) {
+			var declType = target.DeclaringType;
+			if (declType is null)
+				return (null, "");
+
+			if (declType.IsInterface) {
+				if (type.IsInterface)
+					return (null, ""); // an interface method's implementers are concrete types
+				// Explicit implementation (.override / MethodImpl) is unambiguous, so it wins.
+				foreach (var m in type.Methods) {
+					if ((!m.IsVirtual && !m.IsStatic) || m.IsAbstract)
+						continue;
+					if (m.HasOverrides && m.Overrides.Any(o => ResolvesTo(o, target)))
+						return (m, "explicit");
+				}
+				// Implicit implementation: the type (or a base) declares the interface, and a method
+				// matches by name and generic-aware signature.
+				var ifaceCtx = GetInterfaceContext(type, declType);
+				if (ifaceCtx is not null) {
+					foreach (var m in type.Methods) {
+						if ((!m.IsVirtual && !m.IsStatic) || m.IsAbstract)
+							continue;
+						if (m.Name != target.Name)
+							continue;
+						if (TypesHierarchyHelpers.MatchInterfaceMethod(m, target, ifaceCtx))
+							return (m, "interface");
+					}
+				}
+				return (null, "");
+			}
+
+			if (target.IsVirtual || target.IsAbstract) {
+				if (!TypesHierarchyHelpers.IsBaseType(declType, type, resolveTypeArguments: false))
+					return (null, "");
+				foreach (var m in type.Methods) {
+					if (TypesHierarchyHelpers.IsBaseMethod(target, m)) {
+						var hides = !m.IsVirtual ^ m.IsNewSlot;
+						return (m, hides ? "hides" : "override");
+					}
+					if (m.HasOverrides && m.Overrides.Any(o => ResolvesTo(o, target)))
+						return (m, "explicit");
+				}
+			}
+			return (null, "");
+		}
+
+		static bool ResolvesTo(MethodOverride o, MethodDef target) =>
+			o.MethodDeclaration.ResolveMethodDef() is MethodDef md && SameDef(md, target);
+
+		static bool SameDef(MethodDef a, MethodDef b) =>
+			a == b || (a.MDToken == b.MDToken &&
+				string.Equals(a.Module?.Location, b.Module?.Location, StringComparison.OrdinalIgnoreCase));
+
+		// The (possibly generic) interface reference on `type` or one of its base types that corresponds
+		// to `ifaceDef`, so MatchInterfaceMethod has the right generic context. Mirrors the analyzer's
+		// InterfaceMethodImplementedByNode.GetInterface.
+		static ITypeDefOrRef? GetInterfaceContext(TypeDef type, TypeDef ifaceDef) {
+			foreach (var t in TypesHierarchyHelpers.GetTypeAndBaseTypes(type)) {
+				var td = t.Resolve();
+				if (td is null)
+					break;
+				foreach (var ii in td.Interfaces) {
+					if (new SigComparer().Equals(ii.Interface.GetScopeType(), ifaceDef))
+						return ii.Interface;
+				}
+			}
+			return null;
+		}
+
+		static string TargetOverrideKind(MethodDef t) =>
+			t.DeclaringType?.IsInterface == true ? "interface" :
+			t.IsAbstract ? "abstract" :
+			t.IsVirtual ? "virtual" :
+			"non-virtual";
+
+		string ExtractIocs(JObject args) {
+			var module = ReqStr(args, "module");
+			var wanted = ParseCategories((string?)args["categories"]);
+			var max = Clamp((int?)args["max"] ?? 500, 1, MaxListItems);
+
+			lock (metadataLock) {
+				var mod = MetadataResolver.ResolveModule(documentService.Value, module);
+				var iocs = new JArray();
+				var seen = new Dictionary<string, JObject>();
+				var counts = new Dictionary<string, int>();
+
+				foreach (var m in EnumerateMethods(mod)) {
+					if (iocs.Count >= max) break;
+					var dotted = (m.DeclaringType?.FullName ?? "") + "." + m.Name;
+
+					if (wanted.Contains("pinvoke") && m.ImplMap is ImplMap map) {
+						var dll = map.Module?.Name.String ?? "?";
+						var entry = UTF8String.IsNullOrEmpty(map.Name) ? m.Name.String : map.Name.String;
+						AddIoc(iocs, seen, counts, max, "pinvoke", dll + "!" + entry, dotted, m.MDToken);
+					}
+
+					if (!m.HasBody)
+						continue;
+					foreach (var instr in m.Body.Instructions) {
+						if (instr.OpCode.Code != Code.Ldstr || instr.Operand is not string s || s.Length == 0)
+							continue;
+						foreach (var (cat, value) in ScanString(s, wanted)) {
+							AddIoc(iocs, seen, counts, max, cat, value, dotted, m.MDToken);
+							if (iocs.Count >= max) break;
+						}
+						if (iocs.Count >= max) break;
+					}
+				}
+
+				var countObj = new JObject();
+				foreach (var kv in counts.OrderBy(k => k.Key))
+					countObj[kv.Key] = kv.Value;
+				var catArr = new JArray();
+				foreach (var c in wanted.OrderBy(x => x))
+					catArr.Add(c);
+				return Json(new JObject {
+					["module"] = mod.Name?.String,
+					["categories"] = catArr,
+					["counts"] = countObj,
+					["returned"] = iocs.Count,
+					["iocs"] = iocs,
+				});
+			}
+		}
+
+		static readonly string[] IocCategories = { "url", "ip", "registry", "path", "email", "pinvoke", "base64" };
+		// base64 matches any long run of base64 characters, so it is noisy — opt in rather than sweep by default.
+		static readonly string[] DefaultIocCategories = { "url", "ip", "registry", "path", "email", "pinvoke" };
+
+		static HashSet<string> ParseCategories(string? arg) {
+			if (string.IsNullOrWhiteSpace(arg))
+				return new HashSet<string>(DefaultIocCategories);
+			var set = new HashSet<string>();
+			foreach (var raw in arg!.Split(new[] { ',', ' ', ';' }, StringSplitOptions.RemoveEmptyEntries)) {
+				var c = raw.Trim().ToLowerInvariant();
+				if (Array.IndexOf(IocCategories, c) < 0)
+					throw new ArgumentException($"unknown category '{c}'; valid: {string.Join(", ", IocCategories)}");
+				set.Add(c);
+			}
+			return set.Count == 0 ? new HashSet<string>(DefaultIocCategories) : set;
+		}
+
+		static IEnumerable<(string cat, string value)> ScanString(string s, HashSet<string> wanted) {
+			if (wanted.Contains("url"))
+				foreach (Match m in RxUrl.Matches(s)) yield return ("url", m.Value);
+			if (wanted.Contains("ip"))
+				foreach (Match m in RxIp.Matches(s)) yield return ("ip", m.Value);
+			if (wanted.Contains("registry"))
+				foreach (Match m in RxRegistry.Matches(s)) yield return ("registry", m.Value);
+			if (wanted.Contains("path"))
+				foreach (Match m in RxPath.Matches(s)) yield return ("path", m.Value);
+			if (wanted.Contains("email"))
+				foreach (Match m in RxEmail.Matches(s)) yield return ("email", m.Value);
+			if (wanted.Contains("base64"))
+				foreach (Match m in RxBase64.Matches(s)) yield return ("base64", m.Value);
+		}
+
+		static void AddIoc(JArray iocs, Dictionary<string, JObject> seen, Dictionary<string, int> counts,
+				int max, string category, string value, string method, MDToken token) {
+			var key = category + " " + value;
+			if (seen.TryGetValue(key, out var existing)) {
+				existing["occurrences"] = (int)existing["occurrences"]! + 1;
+				return;
+			}
+			if (iocs.Count >= max)
+				return;
+			counts[category] = counts.TryGetValue(category, out var c) ? c + 1 : 1;
+			var o = new JObject {
+				["category"] = category,
+				["value"] = value,
+				["method"] = method,
+				["token"] = Token(token),
+				["occurrences"] = 1,
+			};
+			seen[key] = o;
+			iocs.Add(o);
+		}
+
+		// Deliberately conservative patterns: octet-validated IPv4, drive/UNC-anchored paths and
+		// HK*-anchored registry keys, so a version string or a bare token is not reported as an IOC.
+		static readonly Regex RxUrl = new(@"\b(?:https?|ftp)://[^\s""'<>|\\]+", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+		static readonly Regex RxIp = new(@"\b(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)\b", RegexOptions.Compiled);
+		static readonly Regex RxRegistry = new(@"(?:HKEY_[A-Z_]+|HKLM|HKCU|HKCR|HKU|HKCC)(?:\\[^\s""'<>|]+)+", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+		static readonly Regex RxPath = new(@"(?:[A-Za-z]:\\|\\\\)[^\s""'<>|*?]+", RegexOptions.Compiled);
+		static readonly Regex RxEmail = new(@"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b", RegexOptions.Compiled);
+		static readonly Regex RxBase64 = new(@"[A-Za-z0-9+/]{32,}={0,2}", RegexOptions.Compiled);
 
 		IDecompiler DecompilerFor(string? format) {
 			if (string.IsNullOrEmpty(format) || string.Equals(format, "csharp", StringComparison.OrdinalIgnoreCase))

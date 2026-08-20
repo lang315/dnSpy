@@ -61,7 +61,7 @@ Or add to your MCP client config:
 Call `dnspy_info` at any time to check which instance you reached, whether authentication is on and
 which settings file it is using.
 
-## Tools (38)
+## Tools (40)
 
 Endpoint:
 - `dnspy_info` — which dnSpy this is, its version and port, whether a token is required and where it
@@ -74,6 +74,10 @@ Static analysis (no debug session — read and explore an assembly on disk or op
 - `search` — member names (wildcards) and/or string literals used in method bodies, with locations
 - `find_references` — the methods that call a given method (reverse call graph), within the module or
   every open assembly
+- `find_implementations` — the methods that override or implement a virtual/abstract/interface method
+  (the forward direction of the hierarchy), within the module or every open assembly
+- `extract_iocs` — URLs, IPs, registry keys, file paths, e-mail addresses and P/Invoke imports found by
+  static reading, each tied to the method it appears in; for triage and malware-analysis reporting
 
 Session control:
 - `dbg_status` — is-debugging / running / process list
