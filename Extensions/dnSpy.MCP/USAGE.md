@@ -206,15 +206,6 @@ Kết quả trả về là JSON dạng text. Lỗi trả về dưới dạng MCP
 
 Tool chỉ đọc mang annotation `readOnlyHint`; tool thay đổi tiến trình (`dbg_start`, `dbg_write_memory`, `dbg_set_variable`, …) mang `destructiveHint` để client cảnh báo.
 
-### Phân tích live / packed (cần tiến trình đang paused)
-
-Với app bị **pack/bảo vệ** — file trên đĩa không parse được nhưng code thật đã được giải nén trong bộ nhớ.
-
-| Tool | Tham số | Mô tả |
-|---|---|---|
-| `dump_module` | `module` (bắt buộc, tên từ `dbg_modules`), `save_path` | Dump ảnh in-memory của 1 module đã nạp ra đĩa (dạng đã unpack), rồi chĩa các tool tĩnh (`list_types`/`decompile`/`search`/`extract_iocs`) vào file đó. |
-| `mem_load` | `module` (bắt buộc) | Nạp module từ bộ nhớ tiến trình (dạng in-memory) vào dnSpy, rồi phân tích theo tên bằng các tool tĩnh. Giống `dump_module` nhưng giữ trong dnSpy thay vì ghi file. |
-
 ### Nhận sự kiện realtime (SSE)
 
 Client có thể mở stream `GET /mcp` với header `Accept: text/event-stream`. Server đẩy notification JSON-RPC `notifications/paused` mỗi khi tiến trình dừng (trúng breakpoint / step xong / break), giúp agent phản ứng tức thì mà không cần poll `dbg_wait_for_break`.

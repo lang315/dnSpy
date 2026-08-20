@@ -61,7 +61,7 @@ Or add to your MCP client config:
 Call `dnspy_info` at any time to check which instance you reached, whether authentication is on and
 which settings file it is using.
 
-## Tools (46)
+## Tools (44)
 
 Endpoint:
 - `dnspy_info` — which dnSpy this is, its version and port, whether a token is required and where it
@@ -112,11 +112,6 @@ Inspection (require a paused process):
 - `dbg_set_variable` — assign a new value to a variable
 - `dbg_set_next_statement` — move the instruction pointer to another IL offset
 - `dbg_read_memory` / `dbg_write_memory` — raw process memory as hex
-
-Live / packed analysis (reach into the running debuggee; require a paused process):
-- `dump_module` — dump a loaded module's in-memory image to disk — a packed/protected assembly in its
-  unpacked form — then analyse the file with the static tools
-- `mem_load` — load a module from process memory into dnSpy, then analyse it by name with the static tools
 
 Read-only tools carry a `readOnlyHint` annotation; process-changing tools (`dbg_start`, `dbg_write_memory`, `dbg_set_variable`, …) carry `destructiveHint`.
 
