@@ -7,7 +7,7 @@ Ngày: 2026-08-15
 
 Extension đã **sẵn sàng release**. Vài dòng cũ bên dưới nay đã lỗi thời; trạng thái cuối:
 
-- **36 tool** — thêm `dnspy_info` và nhóm **phân tích tĩnh** `decompile`/`list_types`/`list_methods`
+- **38 tool** — thêm `dnspy_info` và nhóm **phân tích tĩnh** (`decompile` C#/IL, `list_types`, `list_methods`, `search`, `find_references`)
   (đọc & khám phá assembly không cần debug session). Xác thực **bật mặc định** (token sinh tự động,
   lưu cạnh file settings).
 - **Đã có test project trong repo** (bác bỏ mục 19): Tier 1 (105 test, chạy CI qua `mcp-tests.yml`),

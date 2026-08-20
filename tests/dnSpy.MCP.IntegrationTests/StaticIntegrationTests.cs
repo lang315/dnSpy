@@ -139,5 +139,122 @@ namespace dnSpy.MCP.IntegrationTests {
 			var error = Dbg.CallExpectingError("decompile", new JObject { ["module"] = Dbg.FixtureDll() });
 			Assert.Contains("method", error, StringComparison.OrdinalIgnoreCase);
 		}
+
+		// ---- format=il ----
+
+		[DbgFact]
+		public void A_method_can_be_disassembled_to_il() {
+			var il = Dbg.Call("decompile", new JObject {
+				["module"] = Dbg.FixtureDll(),
+				["method"] = "DbgTest.Program.Add",
+				["format"] = "il",
+			});
+
+			// IL, not C#: opcodes and a stack directive, and no C# 'return a + b;'.
+			Assert.Contains(".maxstack", il);
+			Assert.Contains("ldarg", il);
+			Assert.Contains("ret", il);
+			Assert.DoesNotContain("return a + b;", il);
+		}
+
+		[DbgFact]
+		public void An_unknown_format_is_rejected() {
+			var error = Dbg.CallExpectingError("decompile", new JObject {
+				["module"] = Dbg.FixtureDll(),
+				["method"] = "DbgTest.Program.Add",
+				["format"] = "python",
+			});
+			Assert.Contains("format", error, StringComparison.OrdinalIgnoreCase);
+		}
+
+		// ---- search ----
+
+		[DbgFact]
+		public void A_string_literal_is_found_with_the_method_that_uses_it() {
+			var res = Dbg.CallJson("search", new JObject {
+				["module"] = Dbg.FixtureDll(),
+				["query"] = "hello",
+				["kind"] = "strings",
+			});
+			var hits = (JArray)res["hits"]!;
+
+			// The fixture loads "hello" in Inspect; the hit carries the method and its token.
+			var hit = hits.FirstOrDefault(h => (string?)h["kind"] == "string");
+			Assert.NotNull(hit);
+			Assert.Equal("hello", (string?)hit!["value"]);
+			Assert.Contains("Inspect", (string?)hit["name"]);
+			Assert.StartsWith("0x06", (string?)hit["token"]);
+		}
+
+		[DbgFact]
+		public void Member_names_are_found_by_dotted_pattern_and_by_simple_name() {
+			var byDotted = (JArray)Dbg.CallJson("search", new JObject {
+				["module"] = Dbg.FixtureDll(),
+				["query"] = "*.Level*",
+				["kind"] = "names",
+			})["hits"]!;
+			// The signature form uses '::', which a dotted query would miss — this proves the friendly
+			// match. Level1/Level2/Level3 are all methods.
+			Assert.Equal(3, byDotted.Count(h => (string?)h["kind"] == "method"));
+			Assert.All(byDotted.Where(h => (string?)h["kind"] == "method"),
+				h => Assert.Contains("DbgTest.Program.Level", (string?)h["name"]));
+
+			var bySimple = (JArray)Dbg.CallJson("search", new JObject {
+				["module"] = Dbg.FixtureDll(),
+				["query"] = "Level?",
+				["kind"] = "names",
+			})["hits"]!;
+			Assert.Equal(3, bySimple.Count(h => (string?)h["kind"] == "method"));
+		}
+
+		// The token a name search reports drives decompile — the tools compose.
+		[DbgFact]
+		public void A_search_hit_token_decompiles() {
+			var hit = ((JArray)Dbg.CallJson("search", new JObject {
+				["module"] = Dbg.FixtureDll(),
+				["query"] = "*.Level3",
+				["kind"] = "names",
+			})["hits"]!).First(h => (string?)h["kind"] == "method");
+
+			var src = Dbg.Call("decompile", new JObject {
+				["module"] = Dbg.FixtureDll(),
+				["token"] = (string?)hit["token"],
+			});
+			Assert.Contains("three + 100", src);
+		}
+
+		// ---- find_references ----
+
+		[DbgFact]
+		public void The_callers_of_a_method_are_found() {
+			var res = Dbg.CallJson("find_references", new JObject {
+				["module"] = Dbg.FixtureDll(),
+				["method"] = "DbgTest.Program.Level2",
+			});
+			var callers = (JArray)res["callers"]!;
+
+			// Only Level1 calls Level2 in the fixture.
+			Assert.Contains(callers, c => ((string?)c["caller"])?.Contains("Level1") == true);
+			Assert.All(callers, c => Assert.StartsWith("0x", (string?)c["ilOffset"]));
+			Assert.True((long)res["scannedMethods"]! > 0);
+		}
+
+		[DbgFact]
+		public void Callers_can_be_found_by_target_token() {
+			var addToken = Dbg.TokenOf("DbgTest.Program.Add");
+			var callers = (JArray)Dbg.CallJson("find_references", new JObject {
+				["module"] = Dbg.FixtureDll(),
+				["token"] = addToken,
+			})["callers"]!;
+
+			// Main calls Add in the loop.
+			Assert.Contains(callers, c => ((string?)c["caller"])?.Contains("Main") == true);
+		}
+
+		[DbgFact]
+		public void Find_references_requires_a_target() {
+			var error = Dbg.CallExpectingError("find_references", new JObject { ["module"] = Dbg.FixtureDll() });
+			Assert.Contains("method", error, StringComparison.OrdinalIgnoreCase);
+		}
 	}
 }
