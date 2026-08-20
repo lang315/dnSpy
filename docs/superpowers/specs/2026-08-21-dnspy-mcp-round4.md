@@ -3,7 +3,8 @@
 Bối cảnh: e2e trên phần mềm thật phơi ra **một lỗ hổng cứng** — app bị pack/anti-debug (`PageMiner - HP Tools.exe`)
 không parse tĩnh được dù code đã unpack trong bộ nhớ. Kèm theo: điều hướng tĩnh còn thiếu (chỉ có caller,
 không có field/type ref hay cây kế thừa), không xem được embedded resource (nơi packer giấu payload), và vài
-mép ergonomics (đường dẫn `/`, không có "run to method"). Round này khép chúng lại. **40 → 46 tool.**
+mép ergonomics (đường dẫn `/`, không có "run to method"). Round này khép chúng lại. **40 → 44 tool.**
+(Phần **live/packed** `dump_module`/`mem_load` đã hiện thực + thử nhưng **HOÃN** sau e2e — xem cuối.)
 
 ## Tools
 
@@ -19,9 +20,7 @@ mép ergonomics (đường dẫn `/`, không có "run to method"). Round này kh
 - `dbg_run_to` — chạy tiếp tới 1 method rồi dừng (đặt bp tạm, continue, chờ, gỡ).
 - `ResolveModule` nhận đường dẫn `/` (chuẩn hoá về sep OS; fallback so tên file).
 
-**Live/packed (cần tiến trình paused):**
-- `dump_module` — dump ảnh in-memory của 1 module đã nạp ra đĩa (dạng unpack), rồi phân tích file bằng tool tĩnh.
-- `mem_load` — nạp module từ bộ nhớ vào dnSpy, phân tích theo tên.
+**Live/packed:** đã hiện thực `dump_module`/`mem_load` nhưng **hoãn** (xem "Hoãn").
 
 ## Thiết kế (đều soi gương chính dnSpy)
 
@@ -35,10 +34,8 @@ mép ergonomics (đường dẫn `/`, không có "run to method"). Round này kh
   có `.Data`/`.GetResourceData()`).
 - `dbg_run_to`: tín hiệu "đã tới" = **hit-count của bp mục tiêu tăng** — né được đua RunAll-bất-đồng-bộ (chờ
   `!IsRunning` ngay sau RunAll có thể trả về trên pause cũ).
-- `dump_module`: `DbgProcess.ReadMemory(Address, .., Size)` (vượt cap 64 KB của MemoryTools) + fix layout
-  memory→file bằng dnlib `PEImage` (sao `PEFilesSaver.WritePEFile`); không reference assembly UI.
-- `mem_load`: `DbgMetadataService.TryGetMetadata(module, ForceMemory)` → `ModuleDef` (contract đã reference).
-  **Rủi ro UI-dispatcher đã prototype: gọi từ dbg dispatcher chạy tốt, không cần UI dispatcher.**
+- `dump_module` / `mem_load` (đã hiện thực, **hoãn** — xem cuối): `DbgProcess.ReadMemory` + fix layout dnlib
+  `PEImage`, và `DbgMetadataService.TryGetMetadata(module, ForceMemory)`.
 
 ## Fixture (dbgtest)
 
@@ -50,11 +47,21 @@ IGreeter, Node).
 
 - Build net48 + net10.0-windows sạch (0 warning).
 - Tier 1 105/105.
-- Tier 2 (lọc theo các class mới, `run-integration.ps1 -Filter`): **43/43 pass** — field/type ref, hierarchy,
-  resource, `dbg_run_to`, `dump_module`, `mem_load`, forward-slash. (Thêm tham số `-Filter` cho harness.)
-- Tier 3 conformance: 46 tool.
+- Tier 2 (lọc `StaticIntegrationTests`+`RunToIntegrationTests`, `run-integration.ps1 -Filter`): **40/40 pass** —
+  field/type ref, hierarchy, resource, `dbg_run_to`, forward-slash. (Thêm tham số `-Filter` cho harness.)
+- Tier 3 conformance: 44 tool.
 - **Đã biết (không phải lỗi round này):** chạy *toàn bộ* Tier 2 thỉnh thoảng dính AV upstream của dnSpy
   (`0xC0000005/0xC0000374`, Locals-refresh đọc PE đã free) trong nhóm test attach — harness báo rõ "dnSpy no
   longer answering", các fail sau là hệ quả. Đây là bug upstream đã ghi nhận, không liên quan code round 4.
 
-## Hoãn (ngoài phạm vi): giải mã chuỗi/de4dot, heap inspection, export cả project.
+## Hoãn
+
+- **live/packed (`dump_module` / `mem_load`)** — hiện thực xong, pass trên fixture, nhưng e2e trên module
+  thật lớn bị làm rối (`653C0125.dll` của MilkMax, NETGuard) cho thấy hai đường đều **không bền**: (a)
+  đọc ảnh in-memory rồi tự fix layout PE dao động (kích thước module dnSpy báo đổi giữa các lần break; ảnh
+  convert lẫn ảnh raw đều không parse bằng dnlib); (b) `mem_load` nạp được nhưng document in-memory không
+  resolve theo tên qua `ResolveModule`. Use-case thật (module *vừa packed vừa debug được*) lại không có
+  trên mẫu sẵn có — PageMiner packed **+ anti-debug** (không debug được), 653C0125 của MilkMax không packed
+  (load thẳng từ đĩa OK). ⇒ Gỡ khỏi round 4, để lại cho vòng sau đi thẳng theo cơ chế "Save Module" nội bộ
+  của dnSpy (raw `ReadMemory` + fixup của `PEFilesSaver`), không tự cuộn tay.
+- Ngoài phạm vi (như cũ): giải mã chuỗi/de4dot, heap inspection, export cả project.
