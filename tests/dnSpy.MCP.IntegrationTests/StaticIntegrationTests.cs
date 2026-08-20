@@ -256,5 +256,112 @@ namespace dnSpy.MCP.IntegrationTests {
 			var error = Dbg.CallExpectingError("find_references", new JObject { ["module"] = Dbg.FixtureDll() });
 			Assert.Contains("method", error, StringComparison.OrdinalIgnoreCase);
 		}
+
+		// ---- find_implementations ----
+
+		[DbgFact]
+		public void Interface_implementations_are_found() {
+			var res = Dbg.CallJson("find_implementations", new JObject {
+				["module"] = Dbg.FixtureDll(),
+				["method"] = "DbgTest.IGreeter.Greet",
+			});
+			Assert.Equal("interface", (string?)res["targetKind"]);
+			var impls = (JArray)res["implementations"]!;
+
+			// Exactly two concrete types implement IGreeter.Greet, both implicitly (no explicit .override).
+			var iface = impls.Where(i => (string?)i["kind"] == "interface").ToArray();
+			Assert.Equal(2, iface.Length);
+			Assert.Contains(iface, i => (string?)i["type"] == "DbgTest.EnglishGreeter");
+			Assert.Contains(iface, i => (string?)i["type"] == "DbgTest.FrenchGreeter");
+			Assert.All(iface, i => Assert.StartsWith("0x06", (string?)i["token"]));
+		}
+
+		[DbgFact]
+		public void A_virtual_override_is_found() {
+			var res = Dbg.CallJson("find_implementations", new JObject {
+				["module"] = Dbg.FixtureDll(),
+				["method"] = "DbgTest.Animal.Speak",
+			});
+			Assert.Equal("virtual", (string?)res["targetKind"]);
+			var impls = (JArray)res["implementations"]!;
+
+			// Only Dog overrides Animal.Speak.
+			var overrides = impls.Where(i => (string?)i["kind"] == "override").ToArray();
+			Assert.Single(overrides);
+			Assert.Equal("DbgTest.Dog", (string?)overrides[0]["type"]);
+			// `implements` is the target's dnlib signature form, e.g. "System.String DbgTest.Animal::Speak()".
+			Assert.Contains("DbgTest.Animal::Speak", (string?)overrides[0]["implements"]);
+		}
+
+		// The token find_implementations reports composes back into decompile — and the target can be a token too.
+		[DbgFact]
+		public void Implementations_can_be_found_by_token() {
+			var greet = ((JArray)Dbg.CallJson("list_methods", new JObject {
+				["module"] = Dbg.FixtureDll(),
+				["type"] = "DbgTest.IGreeter",
+			})["methods"]!).First(m => (string?)m["name"] == "Greet");
+
+			var impls = (JArray)Dbg.CallJson("find_implementations", new JObject {
+				["module"] = Dbg.FixtureDll(),
+				["token"] = (string?)greet["token"],
+			})["implementations"]!;
+			Assert.Equal(2, impls.Count(i => (string?)i["kind"] == "interface"));
+		}
+
+		[DbgFact]
+		public void Find_implementations_requires_a_target() {
+			var error = Dbg.CallExpectingError("find_implementations", new JObject { ["module"] = Dbg.FixtureDll() });
+			Assert.Contains("method", error, StringComparison.OrdinalIgnoreCase);
+		}
+
+		// ---- extract_iocs ----
+
+		[DbgFact]
+		public void Iocs_are_extracted_and_attributed_to_their_method() {
+			var iocs = (JArray)Dbg.CallJson("extract_iocs", new JObject { ["module"] = Dbg.FixtureDll() })["iocs"]!;
+
+			void Has(string category, string value, string method) {
+				var hit = iocs.FirstOrDefault(i => (string?)i["category"] == category && (string?)i["value"] == value);
+				Assert.True(hit is not null, $"expected {category} '{value}'");
+				Assert.Contains(method, (string?)hit!["method"]);
+				Assert.StartsWith("0x06", (string?)hit["token"]);
+			}
+
+			Has("url", "http://example.com/beacon", "Indicators");
+			Has("ip", "192.168.10.50", "Indicators");
+			Has("registry", "HKLM\\SOFTWARE\\DbgTest\\Config", "Indicators");
+			Has("path", "C:\\Windows\\Temp\\payload.bin", "Indicators");
+			Has("email", "operator@dbgtest.invalid", "Indicators");
+			Has("pinvoke", "kernel32.dll!GetTickCount", "NativeGetTickCount");
+		}
+
+		[DbgFact]
+		public void Base64_is_opt_in_not_part_of_the_default_sweep() {
+			var names = ((JArray)Dbg.CallJson("extract_iocs", new JObject { ["module"] = Dbg.FixtureDll() })["categories"]!)
+				.Select(c => (string?)c).ToArray();
+			Assert.Contains("url", names);
+			Assert.Contains("pinvoke", names);
+			Assert.DoesNotContain("base64", names); // noisy, so extracted only when explicitly requested
+		}
+
+		[DbgFact]
+		public void The_category_filter_narrows_the_sweep() {
+			var iocs = (JArray)Dbg.CallJson("extract_iocs", new JObject {
+				["module"] = Dbg.FixtureDll(),
+				["categories"] = "email",
+			})["iocs"]!;
+
+			Assert.NotEmpty(iocs);
+			Assert.All(iocs, i => Assert.Equal("email", (string?)i["category"]));
+		}
+
+		[DbgFact]
+		public void An_unknown_ioc_category_is_rejected() {
+			var error = Dbg.CallExpectingError("extract_iocs", new JObject {
+				["module"] = Dbg.FixtureDll(),
+				["categories"] = "malware",
+			});
+			Assert.Contains("category", error, StringComparison.OrdinalIgnoreCase);
+		}
 	}
 }

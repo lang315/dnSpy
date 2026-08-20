@@ -25,6 +25,9 @@ namespace DbgTest {
 
 		public static void Main() {
 			Console.WriteLine("dbgtest ready");
+			// Touch the analysis-only members (interface impls, a virtual override, IOC strings, a P/Invoke)
+			// once so the compiler emits them all; find_implementations and extract_iocs read them statically.
+			Warmup();
 			// Never freed: the pin has to outlive every test that writes through the address, and the
 			// fixture is killed at the end of the run.
 			var pin = GCHandle.Alloc(Scratch, GCHandleType.Pinned);
@@ -130,6 +133,34 @@ namespace DbgTest {
 			var ticks = 99;
 			return ticks;
 		}
+
+		[DllImport("kernel32.dll", EntryPoint = "GetTickCount")]
+		static extern uint NativeGetTickCount();
+
+		/// <summary>
+		/// Synthetic indicators of compromise for the extract_iocs test. None of these are real
+		/// infrastructure — they exist only as string literals for the static extractor to find.
+		/// </summary>
+		public static string Indicators() {
+			var url = "http://example.com/beacon";
+			var ip = "192.168.10.50";
+			var registry = "HKLM\\SOFTWARE\\DbgTest\\Config";
+			var path = "C:\\Windows\\Temp\\payload.bin";
+			var email = "operator@dbgtest.invalid";
+			return url + " " + ip + " " + registry + " " + path + " " + email;
+		}
+
+		/// <summary>
+		/// Exercises the interface implementations, the virtual override and the P/Invoke so the compiler
+		/// emits them all; find_implementations and extract_iocs then read them off disk.
+		/// </summary>
+		static void Warmup() {
+			IGreeter[] greeters = { new EnglishGreeter(), new FrenchGreeter() };
+			Animal animal = new Dog();
+			var sink = Indicators() + greeters[0].Greet() + greeters[1].Greet() + animal.Speak() + NativeGetTickCount();
+			if (sink.Length < 0)
+				Console.WriteLine(sink); // never true; keeps `sink` live without extra console noise
+		}
 	}
 
 	/// <summary>Nested type, reached as "DbgTest.Outer.Inner.Ping" — the '.' to '+' resolution path.</summary>
@@ -157,5 +188,27 @@ namespace DbgTest {
 				return 123;
 			}
 		}
+	}
+
+	/// <summary>An interface implemented by two concrete types — the target for find_implementations.</summary>
+	public interface IGreeter {
+		string Greet();
+	}
+
+	public sealed class EnglishGreeter : IGreeter {
+		public string Greet() => "hello-en";
+	}
+
+	public sealed class FrenchGreeter : IGreeter {
+		public string Greet() => "bonjour";
+	}
+
+	/// <summary>A virtual method overridden by exactly one derived type — the other find_implementations case.</summary>
+	public class Animal {
+		public virtual string Speak() => "...";
+	}
+
+	public sealed class Dog : Animal {
+		public override string Speak() => "woof";
 	}
 }

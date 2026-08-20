@@ -137,6 +137,21 @@ curl -s http://127.0.0.1:27115/mcp -H 'content-type: application/json' \
 
 Kết quả trả về là JSON dạng text. Lỗi trả về dưới dạng MCP tool error (`isError: true`) kèm thông báo.
 
+### Endpoint & phân tích tĩnh (không cần phiên debug)
+
+Đọc và khám phá assembly ngay trên đĩa (hoặc đã mở trong dnSpy) mà không cần chạy nó — điểm khởi đầu khi reverse một assembly lạ.
+
+| Tool | Tham số | Mô tả |
+|---|---|---|
+| `dnspy_info` | — | Đây là dnSpy nào: phiên bản, cổng, số tool, xác thực có bật không + nguồn token, file settings đang dùng. |
+| `list_types` | `module` (bắt buộc), `filter`, `max` | Liệt kê type trong module (tên đầy đủ, token, kind); `filter` là pattern `*`/`?`. |
+| `list_methods` | `module`, `type` (bắt buộc) | Liệt kê method của 1 type kèm token + chữ ký — đưa token cho `bp_add`/`decompile`. |
+| `decompile` | `module` (bắt buộc), `method`\|`type`\|`token`, `format` | Dịch ngược 1 method (mọi overload)/type/token → C#; `format="il"` để xem IL (opcode + offset, hữu ích với code bị obfuscate). |
+| `search` | `module`, `query` (bắt buộc), `kind`, `max` | Tìm tên member (`*`/`?`) và/hoặc chuỗi literal trong thân method, kèm vị trí + token. |
+| `find_references` | `module` (bắt buộc), `method`\|`token`, `scope`, `max` | Các method **gọi** method đích (call graph ngược); `scope="open"` để quét mọi assembly đang mở. |
+| `find_implementations` | `module` (bắt buộc), `method`\|`token`, `scope`, `max` | Các method **override/hiện thực** một method ảo/abstract/interface (chiều xuôi của cây kế thừa) — bổ sung cho `find_references`. |
+| `extract_iocs` | `module` (bắt buộc), `categories`, `max` | Trích IOC bằng đọc tĩnh: URL, IP, khóa registry, đường dẫn file, email trong chuỗi literal + import P/Invoke, mỗi cái gắn với method chứa nó. Phục vụ triage / báo cáo phân tích mã độc. `categories` lọc theo `url,ip,registry,path,email,pinvoke,base64` (mặc định tất cả trừ `base64`). |
+
 ### Điều khiển phiên
 
 | Tool | Tham số | Mô tả |

@@ -36,12 +36,17 @@ function Resolve-DnSpy {
         if (-not (Test-Path $DnSpy)) { throw "dnSpy.exe not found at $DnSpy" }
         return (Resolve-Path $DnSpy).Path
     }
+    # Wrap the filtered pipeline in @() so a single surviving candidate stays an array. Without it,
+    # a lone match collapses to a scalar string and $candidates[0] returns its first *character* ("C"),
+    # which then fails Start-Process with "cannot find the file specified".
     $candidates = @(
-        "$repo\dnSpy\dnSpy\bin\Release\net10.0-windows\dnSpy.exe",
-        "$repo\dnSpy\dnSpy\bin\Release\net48\dnSpy.exe",
-        "$repo\dnSpy\dnSpy\bin\Debug\net10.0-windows\dnSpy.exe"
-    ) | Where-Object { Test-Path $_ }
-    if (-not $candidates) {
+        @(
+            "$repo\dnSpy\dnSpy\bin\Release\net10.0-windows\dnSpy.exe",
+            "$repo\dnSpy\dnSpy\bin\Release\net48\dnSpy.exe",
+            "$repo\dnSpy\dnSpy\bin\Debug\net10.0-windows\dnSpy.exe"
+        ) | Where-Object { Test-Path $_ }
+    )
+    if ($candidates.Count -eq 0) {
         throw "Could not find a built dnSpy.exe. Build the repo first (./build.ps1) or pass -DnSpy."
     }
     return $candidates[0]
@@ -155,8 +160,14 @@ try {
     $env:DNSPY_MCP_TEST_FIXTURE_SRC = "$repo\tests\fixture\dbgtest"
 
     Write-Step 'Running the integration suite'
-    & dotnet test "$repo\tests\dnSpy.MCP.IntegrationTests" -c Release --nologo
+    # Emit a TRX so per-test results survive to disk. This suite is not in CI (it needs an interactive
+    # desktop), and PowerShell's native-stderr wrapping can mangle the console summary, so the TRX is
+    # the reliable record of what passed.
+    $trxDir = Join-Path $repo 'TestResults'
+    & dotnet test "$repo\tests\dnSpy.MCP.IntegrationTests" -c Release --nologo `
+        --logger 'trx;LogFileName=integration.trx' --results-directory $trxDir
     $testExit = $LASTEXITCODE
+    Write-Host "    results: $trxDir\integration.trx" -ForegroundColor DarkGray
 
     if (Test-Path $log) {
         Write-Step 'Server log'

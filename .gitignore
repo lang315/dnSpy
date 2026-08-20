@@ -11,3 +11,6 @@ launchSettings.json
 # Integration-test fixture build output
 tests/fixture/*/bin/
 tests/fixture/*/obj/
+
+# Integration-test TRX results (run-integration.ps1)
+TestResults/
