@@ -61,7 +61,7 @@ Or add to your MCP client config:
 Call `dnspy_info` at any time to check which instance you reached, whether authentication is on and
 which settings file it is using.
 
-## Tools (36)
+## Tools (38)
 
 Endpoint:
 - `dnspy_info` — which dnSpy this is, its version and port, whether a token is required and where it
@@ -70,7 +70,10 @@ Endpoint:
 Static analysis (no debug session — read and explore an assembly on disk or open in dnSpy):
 - `list_types` — types in a module, with tokens and kinds; optional name wildcard
 - `list_methods` — methods of a type, with metadata tokens and signatures
-- `decompile` — a method (all overloads), a type, or a metadata token → C#
+- `decompile` — a method (all overloads), a type, or a metadata token → C# (`format: "il"` for IL)
+- `search` — member names (wildcards) and/or string literals used in method bodies, with locations
+- `find_references` — the methods that call a given method (reverse call graph), within the module or
+  every open assembly
 
 Session control:
 - `dbg_status` — is-debugging / running / process list
