@@ -25,4 +25,10 @@
     <ProduceReferenceAssembly>false</ProduceReferenceAssembly>
   </PropertyGroup>
 
+  <!-- A known embedded resource for list_resources / extract_resource. LogicalName pins the manifest
+       name so it doesn't depend on RootNamespace. -->
+  <ItemGroup>
+    <EmbeddedResource Include="embedded.txt" LogicalName="dbgtest.embedded.txt" />
+  </ItemGroup>
+
 </Project>

@@ -32,13 +32,17 @@ namespace dnSpy.MCP.Tools {
 	static class MetadataResolver {
 		/// <summary>The module for a path (loaded if needed) or the file/module name of one already open.</summary>
 		public static ModuleDef ResolveModule(IDsDocumentService documentService, string module) {
+			// Accept forward slashes (JSON callers routinely send them) by normalising to the OS separator.
+			var norm = module.Replace('/', Path.DirectorySeparatorChar);
+			var name = Path.GetFileName(norm); // so 'dir/foo.dll' still matches an already-open 'foo.dll'
 			IDsDocument? doc;
-			if (File.Exists(module))
-				doc = documentService.TryGetOrCreate(DsDocumentInfo.CreateDocument(module));
+			if (File.Exists(norm))
+				doc = documentService.TryGetOrCreate(DsDocumentInfo.CreateDocument(norm));
 			else
 				doc = documentService.GetDocuments().FirstOrDefault(d =>
-					string.Equals(Path.GetFileName(d.Filename), module, StringComparison.OrdinalIgnoreCase) ||
-					string.Equals(d.ModuleDef?.Name, module, StringComparison.OrdinalIgnoreCase));
+					string.Equals(Path.GetFileName(d.Filename), name, StringComparison.OrdinalIgnoreCase) ||
+					string.Equals(d.ModuleDef?.Name, module, StringComparison.OrdinalIgnoreCase) ||
+					string.Equals(d.ModuleDef?.Name, name, StringComparison.OrdinalIgnoreCase));
 			return doc?.ModuleDef
 				?? throw new InvalidOperationException($"could not load module '{module}'; pass a full path or open it in dnSpy first");
 		}

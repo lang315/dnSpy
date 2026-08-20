@@ -22,7 +22,8 @@
 [CmdletBinding()]
 param(
     [string]$DnSpy,
-    [switch]$KeepRunning
+    [switch]$KeepRunning,
+    [string]$Filter   # optional dotnet-test --filter (e.g. 'FullyQualifiedName~StaticIntegrationTests')
 )
 
 $ErrorActionPreference = 'Stop'
@@ -164,8 +165,9 @@ try {
     # desktop), and PowerShell's native-stderr wrapping can mangle the console summary, so the TRX is
     # the reliable record of what passed.
     $trxDir = Join-Path $repo 'TestResults'
+    $filterArgs = if ($Filter) { @('--filter', $Filter) } else { @() }
     & dotnet test "$repo\tests\dnSpy.MCP.IntegrationTests" -c Release --nologo `
-        --logger 'trx;LogFileName=integration.trx' --results-directory $trxDir
+        --logger 'trx;LogFileName=integration.trx' --results-directory $trxDir @filterArgs
     $testExit = $LASTEXITCODE
     Write-Host "    results: $trxDir\integration.trx" -ForegroundColor DarkGray
 
