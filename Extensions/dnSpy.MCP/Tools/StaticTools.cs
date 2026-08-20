@@ -240,22 +240,21 @@ namespace dnSpy.MCP.Tools {
 						Add(hits, max, "type", t.FullName, t.MDToken, null);
 					foreach (var f in t.Fields) {
 						if (hits.Count >= max) break;
-						var dotted = t.FullName + "." + f.Name;
+						var dotted = Dotted(f);
 						if (wantNames && NameMatches(rx!, dotted, f.Name))
 							Add(hits, max, "field", dotted, f.MDToken, null);
 					}
 					foreach (var m in t.Methods) {
 						if (hits.Count >= max) break;
-						var dotted = t.FullName + "." + m.Name;
+						var dotted = Dotted(m);
 						if (wantNames && NameMatches(rx!, dotted, m.Name))
 							Add(hits, max, "method", dotted, m.MDToken, null);
-						if (wantStrings && m.HasBody) {
-							foreach (var instr in m.Body.Instructions) {
-								if (instr.OpCode.Code == Code.Ldstr && instr.Operand is string s &&
-									s.IndexOf(query, StringComparison.OrdinalIgnoreCase) >= 0) {
-									Add(hits, max, "string", dotted, m.MDToken, s);
-									if (hits.Count >= max) break;
-								}
+						if (wantStrings) {
+							foreach (var s in StringLiterals(m)) {
+								if (s.IndexOf(query, StringComparison.OrdinalIgnoreCase) < 0)
+									continue;
+								Add(hits, max, "string", dotted, m.MDToken, s);
+								if (hits.Count >= max) break;
 							}
 						}
 					}
@@ -288,18 +287,8 @@ namespace dnSpy.MCP.Tools {
 
 			lock (metadataLock) {
 				var mod = MetadataResolver.ResolveModule(documentService.Value, module);
-				MethodDef[] targets;
-				if (token is not null)
-					targets = new[] { ResolveToken(mod, token) as MethodDef
-						?? throw new InvalidOperationException("token does not resolve to a method") };
-				else if (!string.IsNullOrEmpty(method))
-					targets = MetadataResolver.ResolveMethods(mod, method!);
-				else
-					throw new ArgumentException("provide 'method' or 'token'");
-
-				var modules = scope == "open"
-					? documentService.Value.GetDocuments().Select(d => d.ModuleDef).OfType<ModuleDef>().Distinct().ToList()
-					: new List<ModuleDef> { mod };
+				var targets = ResolveTargets(mod, method, token);
+				var modules = ModulesForScope(mod, scope);
 
 				var callers = new JArray();
 				long scanned = 0;
@@ -338,16 +327,45 @@ namespace dnSpy.MCP.Tools {
 					yield return m;
 		}
 
+		// Resolve the target method(s) a find_* tool operates on: a metadata token (takes precedence) or a
+		// fully-qualified name (every overload). Shared by find_references and find_implementations.
+		static MethodDef[] ResolveTargets(ModuleDef mod, string? method, string? token) {
+			if (token is not null)
+				return new[] { ResolveToken(mod, token) as MethodDef
+					?? throw new InvalidOperationException("token does not resolve to a method") };
+			if (!string.IsNullOrEmpty(method))
+				return MetadataResolver.ResolveMethods(mod, method!);
+			throw new ArgumentException("provide 'method' or 'token'");
+		}
+
+		// The modules a 'scope' argument selects: just the target's module, or every assembly open in dnSpy.
+		List<ModuleDef> ModulesForScope(ModuleDef mod, string scope) =>
+			scope == "open"
+				? documentService.Value.GetDocuments().Select(d => d.ModuleDef).OfType<ModuleDef>().Distinct().ToList()
+				: new List<ModuleDef> { mod };
+
+		// The string literals (ldstr operands) in a method body — the shared scan behind search and extract_iocs.
+		static IEnumerable<string> StringLiterals(MethodDef m) {
+			if (!m.HasBody)
+				yield break;
+			foreach (var instr in m.Body.Instructions)
+				if (instr.OpCode.Code == Code.Ldstr && instr.Operand is string s)
+					yield return s;
+		}
+
+		// The friendly dotted member name ("NS.Type.Member"), as decompile/bp_add accept it.
+		static string Dotted(IMemberDef m) => (m.DeclaringType?.FullName ?? "") + "." + m.Name;
+
+		// A MethodDef's cross-module identity: its token is unique only within a module, so pair it with the
+		// module location. Used both to compare methods (SameDef) and to dedup them (the find_implementations seen set).
+		static string MethodKey(MethodDef m) =>
+			m.MDToken.Raw.ToString("X8") + "@" + (m.Module?.Location?.ToLowerInvariant() ?? "");
+
 		// A called reference matches the target when it resolves to the same MethodDef — compared by
 		// token and defining module so a MemberRef from another module still lines up (the pattern
 		// dnSpy's own "used by" analyzer uses). The name prefilter keeps the resolve off the hot path.
-		static bool Same(IMethod called, MethodDef target) {
-			if (called.Name != target.Name)
-				return false;
-			var md = called.ResolveMethodDef();
-			return md is not null && md.MDToken == target.MDToken &&
-				string.Equals(md.Module?.Location, target.Module?.Location, StringComparison.OrdinalIgnoreCase);
-		}
+		static bool Same(IMethod called, MethodDef target) =>
+			called.Name == target.Name && called.ResolveMethodDef() is MethodDef md && SameDef(md, target);
 
 		static bool IsCall(Code code) =>
 			code is Code.Call or Code.Callvirt or Code.Newobj or Code.Ldftn or Code.Ldvirtftn;
@@ -361,18 +379,8 @@ namespace dnSpy.MCP.Tools {
 
 			lock (metadataLock) {
 				var mod = MetadataResolver.ResolveModule(documentService.Value, module);
-				MethodDef[] targets;
-				if (token is not null)
-					targets = new[] { ResolveToken(mod, token) as MethodDef
-						?? throw new InvalidOperationException("token does not resolve to a method") };
-				else if (!string.IsNullOrEmpty(method))
-					targets = MetadataResolver.ResolveMethods(mod, method!);
-				else
-					throw new ArgumentException("provide 'method' or 'token'");
-
-				var modules = scope == "open"
-					? documentService.Value.GetDocuments().Select(d => d.ModuleDef).OfType<ModuleDef>().Distinct().ToList()
-					: new List<ModuleDef> { mod };
+				var targets = ResolveTargets(mod, method, token);
+				var modules = ModulesForScope(mod, scope);
 
 				var impls = new JArray();
 				var seen = new HashSet<string>();
@@ -380,10 +388,10 @@ namespace dnSpy.MCP.Tools {
 				foreach (var type in modules.SelectMany(m => m.GetTypes())) {
 					scannedTypes++;
 					foreach (var target in targets) {
-						var (impl, kind) = MatchImplementation(type, target);
-						if (impl is null)
+						if (MatchImplementation(type, target) is not { } match)
 							continue;
-						if (!seen.Add(impl.MDToken.Raw + "@" + (impl.Module?.Location ?? "")))
+						var (impl, kind) = match;
+						if (!seen.Add(MethodKey(impl)))
 							continue;
 						impls.Add(new JObject {
 							["type"] = type.FullName,
@@ -409,17 +417,17 @@ namespace dnSpy.MCP.Tools {
 		// Mirrors dnSpy's own analyzer: InterfaceMethodImplementedByNode for interface methods and
 		// MethodOverridesNode ("Overridden By") for virtual/abstract class methods. Returns the one
 		// implementing/overriding method in `type` and how it relates to `target`, or null.
-		static (MethodDef? method, string kind) MatchImplementation(TypeDef type, MethodDef target) {
+		static (MethodDef method, string kind)? MatchImplementation(TypeDef type, MethodDef target) {
 			var declType = target.DeclaringType;
 			if (declType is null)
-				return (null, "");
+				return null;
 
 			if (declType.IsInterface) {
 				if (type.IsInterface)
-					return (null, ""); // an interface method's implementers are concrete types
+					return null; // an interface method's implementers are concrete types
 				// Explicit implementation (.override / MethodImpl) is unambiguous, so it wins.
 				foreach (var m in type.Methods) {
-					if ((!m.IsVirtual && !m.IsStatic) || m.IsAbstract)
+					if (!CanImplement(m))
 						continue;
 					if (m.HasOverrides && m.Overrides.Any(o => ResolvesTo(o, target)))
 						return (m, "explicit");
@@ -429,7 +437,7 @@ namespace dnSpy.MCP.Tools {
 				var ifaceCtx = GetInterfaceContext(type, declType);
 				if (ifaceCtx is not null) {
 					foreach (var m in type.Methods) {
-						if ((!m.IsVirtual && !m.IsStatic) || m.IsAbstract)
+						if (!CanImplement(m))
 							continue;
 						if (m.Name != target.Name)
 							continue;
@@ -437,12 +445,12 @@ namespace dnSpy.MCP.Tools {
 							return (m, "interface");
 					}
 				}
-				return (null, "");
+				return null;
 			}
 
 			if (target.IsVirtual || target.IsAbstract) {
 				if (!TypesHierarchyHelpers.IsBaseType(declType, type, resolveTypeArguments: false))
-					return (null, "");
+					return null;
 				foreach (var m in type.Methods) {
 					if (TypesHierarchyHelpers.IsBaseMethod(target, m)) {
 						var hides = !m.IsVirtual ^ m.IsNewSlot;
@@ -452,15 +460,16 @@ namespace dnSpy.MCP.Tools {
 						return (m, "explicit");
 				}
 			}
-			return (null, "");
+			return null;
 		}
+
+		// An implementing/overriding method is virtual or static, and not itself abstract.
+		static bool CanImplement(MethodDef m) => (m.IsVirtual || m.IsStatic) && !m.IsAbstract;
 
 		static bool ResolvesTo(MethodOverride o, MethodDef target) =>
 			o.MethodDeclaration.ResolveMethodDef() is MethodDef md && SameDef(md, target);
 
-		static bool SameDef(MethodDef a, MethodDef b) =>
-			a == b || (a.MDToken == b.MDToken &&
-				string.Equals(a.Module?.Location, b.Module?.Location, StringComparison.OrdinalIgnoreCase));
+		static bool SameDef(MethodDef a, MethodDef b) => a == b || MethodKey(a) == MethodKey(b);
 
 		// The (possibly generic) interface reference on `type` or one of its base types that corresponds
 		// to `ifaceDef`, so MatchInterfaceMethod has the right generic context. Mirrors the analyzer's
@@ -493,25 +502,22 @@ namespace dnSpy.MCP.Tools {
 				var mod = MetadataResolver.ResolveModule(documentService.Value, module);
 				var iocs = new JArray();
 				var seen = new Dictionary<string, JObject>();
-				var counts = new Dictionary<string, int>();
 
 				foreach (var m in EnumerateMethods(mod)) {
 					if (iocs.Count >= max) break;
-					var dotted = (m.DeclaringType?.FullName ?? "") + "." + m.Name;
+					// Built on demand: most methods yield no IOC, and dnlib rebuilds FullName on each access.
+					string? dotted = null;
 
 					if (wanted.Contains("pinvoke") && m.ImplMap is ImplMap map) {
 						var dll = map.Module?.Name.String ?? "?";
 						var entry = UTF8String.IsNullOrEmpty(map.Name) ? m.Name.String : map.Name.String;
-						AddIoc(iocs, seen, counts, max, "pinvoke", dll + "!" + entry, dotted, m.MDToken);
+						AddIoc(iocs, seen, max, "pinvoke", dll + "!" + entry, dotted ??= Dotted(m), m.MDToken);
 					}
 
-					if (!m.HasBody)
-						continue;
-					foreach (var instr in m.Body.Instructions) {
-						if (instr.OpCode.Code != Code.Ldstr || instr.Operand is not string s || s.Length == 0)
-							continue;
+					foreach (var s in StringLiterals(m)) {
+						if (s.Length == 0) continue;
 						foreach (var (cat, value) in ScanString(s, wanted)) {
-							AddIoc(iocs, seen, counts, max, cat, value, dotted, m.MDToken);
+							AddIoc(iocs, seen, max, cat, value, dotted ??= Dotted(m), m.MDToken);
 							if (iocs.Count >= max) break;
 						}
 						if (iocs.Count >= max) break;
@@ -519,8 +525,8 @@ namespace dnSpy.MCP.Tools {
 				}
 
 				var countObj = new JObject();
-				foreach (var kv in counts.OrderBy(k => k.Key))
-					countObj[kv.Key] = kv.Value;
+				foreach (var g in iocs.Cast<JObject>().GroupBy(i => (string)i["category"]!).OrderBy(g => g.Key))
+					countObj[g.Key] = g.Count();
 				var catArr = new JArray();
 				foreach (var c in wanted.OrderBy(x => x))
 					catArr.Add(c);
@@ -534,13 +540,9 @@ namespace dnSpy.MCP.Tools {
 			}
 		}
 
-		static readonly string[] IocCategories = { "url", "ip", "registry", "path", "email", "pinvoke", "base64" };
-		// base64 matches any long run of base64 characters, so it is noisy — opt in rather than sweep by default.
-		static readonly string[] DefaultIocCategories = { "url", "ip", "registry", "path", "email", "pinvoke" };
-
 		static HashSet<string> ParseCategories(string? arg) {
 			if (string.IsNullOrWhiteSpace(arg))
-				return new HashSet<string>(DefaultIocCategories);
+				return new HashSet<string>(DefaultCategories());
 			var set = new HashSet<string>();
 			foreach (var raw in arg!.Split(new[] { ',', ' ', ';' }, StringSplitOptions.RemoveEmptyEntries)) {
 				var c = raw.Trim().ToLowerInvariant();
@@ -548,25 +550,17 @@ namespace dnSpy.MCP.Tools {
 					throw new ArgumentException($"unknown category '{c}'; valid: {string.Join(", ", IocCategories)}");
 				set.Add(c);
 			}
-			return set.Count == 0 ? new HashSet<string>(DefaultIocCategories) : set;
+			return set.Count == 0 ? new HashSet<string>(DefaultCategories()) : set;
 		}
 
 		static IEnumerable<(string cat, string value)> ScanString(string s, HashSet<string> wanted) {
-			if (wanted.Contains("url"))
-				foreach (Match m in RxUrl.Matches(s)) yield return ("url", m.Value);
-			if (wanted.Contains("ip"))
-				foreach (Match m in RxIp.Matches(s)) yield return ("ip", m.Value);
-			if (wanted.Contains("registry"))
-				foreach (Match m in RxRegistry.Matches(s)) yield return ("registry", m.Value);
-			if (wanted.Contains("path"))
-				foreach (Match m in RxPath.Matches(s)) yield return ("path", m.Value);
-			if (wanted.Contains("email"))
-				foreach (Match m in RxEmail.Matches(s)) yield return ("email", m.Value);
-			if (wanted.Contains("base64"))
-				foreach (Match m in RxBase64.Matches(s)) yield return ("base64", m.Value);
+			foreach (var (name, rx) in IocPatterns)
+				if (wanted.Contains(name))
+					foreach (Match m in rx.Matches(s))
+						yield return (name, m.Value);
 		}
 
-		static void AddIoc(JArray iocs, Dictionary<string, JObject> seen, Dictionary<string, int> counts,
+		static void AddIoc(JArray iocs, Dictionary<string, JObject> seen,
 				int max, string category, string value, string method, MDToken token) {
 			var key = category + " " + value;
 			if (seen.TryGetValue(key, out var existing)) {
@@ -575,7 +569,6 @@ namespace dnSpy.MCP.Tools {
 			}
 			if (iocs.Count >= max)
 				return;
-			counts[category] = counts.TryGetValue(category, out var c) ? c + 1 : 1;
 			var o = new JObject {
 				["category"] = category,
 				["value"] = value,
@@ -587,14 +580,22 @@ namespace dnSpy.MCP.Tools {
 			iocs.Add(o);
 		}
 
-		// Deliberately conservative patterns: octet-validated IPv4, drive/UNC-anchored paths and
-		// HK*-anchored registry keys, so a version string or a bare token is not reported as an IOC.
-		static readonly Regex RxUrl = new(@"\b(?:https?|ftp)://[^\s""'<>|\\]+", RegexOptions.IgnoreCase | RegexOptions.Compiled);
-		static readonly Regex RxIp = new(@"\b(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)\b", RegexOptions.Compiled);
-		static readonly Regex RxRegistry = new(@"(?:HKEY_[A-Z_]+|HKLM|HKCU|HKCR|HKU|HKCC)(?:\\[^\s""'<>|]+)+", RegexOptions.IgnoreCase | RegexOptions.Compiled);
-		static readonly Regex RxPath = new(@"(?:[A-Za-z]:\\|\\\\)[^\s""'<>|*?]+", RegexOptions.Compiled);
-		static readonly Regex RxEmail = new(@"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b", RegexOptions.Compiled);
-		static readonly Regex RxBase64 = new(@"[A-Za-z0-9+/]{32,}={0,2}", RegexOptions.Compiled);
+		// One row per string-literal IOC category, in match order (pinvoke is separate — it is read from each
+		// method's ImplMap, not a string regex). Deliberately conservative patterns: octet-validated IPv4,
+		// drive/UNC-anchored paths and HK*-anchored registry keys, so a version string or a bare token is not
+		// reported as an IOC. base64 matches any long base64 run, so it is noisy and opt-in (NoisyCategory).
+		static readonly (string name, Regex rx)[] IocPatterns = {
+			("url",      new(@"\b(?:https?|ftp)://[^\s""'<>|\\]+", RegexOptions.IgnoreCase | RegexOptions.Compiled)),
+			("ip",       new(@"\b(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)\b", RegexOptions.Compiled)),
+			("registry", new(@"(?:HKEY_[A-Z_]+|HKLM|HKCU|HKCR|HKU|HKCC)(?:\\[^\s""'<>|]+)+", RegexOptions.IgnoreCase | RegexOptions.Compiled)),
+			("path",     new(@"(?:[A-Za-z]:\\|\\\\)[^\s""'<>|*?]+", RegexOptions.Compiled)),
+			("email",    new(@"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b", RegexOptions.Compiled)),
+			(NoisyCategory, new(@"[A-Za-z0-9+/]{32,}={0,2}", RegexOptions.Compiled)),
+		};
+		const string NoisyCategory = "base64";
+		// Every category, including the non-regex pinvoke; the default sweep is all of them but the noisy one.
+		static readonly string[] IocCategories = IocPatterns.Select(p => p.name).Append("pinvoke").ToArray();
+		static IEnumerable<string> DefaultCategories() => IocCategories.Where(c => c != NoisyCategory);
 
 		IDecompiler DecompilerFor(string? format) {
 			if (string.IsNullOrEmpty(format) || string.Equals(format, "csharp", StringComparison.OrdinalIgnoreCase))

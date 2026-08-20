@@ -157,9 +157,7 @@ namespace DbgTest {
 		static void Warmup() {
 			IGreeter[] greeters = { new EnglishGreeter(), new FrenchGreeter() };
 			Animal animal = new Dog();
-			var sink = Indicators() + greeters[0].Greet() + greeters[1].Greet() + animal.Speak() + NativeGetTickCount();
-			if (sink.Length < 0)
-				Console.WriteLine(sink); // never true; keeps `sink` live without extra console noise
+			GC.KeepAlive(Indicators() + greeters[0].Greet() + greeters[1].Greet() + animal.Speak() + NativeGetTickCount());
 		}
 	}
 
