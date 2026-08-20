@@ -363,5 +363,160 @@ namespace dnSpy.MCP.IntegrationTests {
 			});
 			Assert.Contains("category", error, StringComparison.OrdinalIgnoreCase);
 		}
+
+		// ---- find_references: fields ----
+
+		[DbgFact]
+		public void Field_reads_and_writes_are_found() {
+			var res = Dbg.CallJson("find_references", new JObject {
+				["module"] = Dbg.FixtureDll(),
+				["field"] = "DbgTest.Program.State",
+			});
+			Assert.Equal("field", (string?)res["targetKind"]);
+			var refs = (JArray)res["references"]!;
+
+			// State is written by SetState and read by ReadState (distinct methods).
+			Assert.Contains(refs, r => ((string?)r["method"])?.EndsWith(".SetState") == true && (string?)r["access"] == "write");
+			Assert.Contains(refs, r => ((string?)r["method"])?.EndsWith(".ReadState") == true && (string?)r["access"] == "read");
+			Assert.All(refs, r => Assert.StartsWith("0x", (string?)r["ilOffset"]));
+		}
+
+		[DbgFact]
+		public void The_field_access_filter_narrows_to_writes() {
+			var refs = (JArray)Dbg.CallJson("find_references", new JObject {
+				["module"] = Dbg.FixtureDll(),
+				["field"] = "DbgTest.Program.State",
+				["access"] = "writes",
+			})["references"]!;
+
+			Assert.NotEmpty(refs);
+			Assert.All(refs, r => Assert.Equal("write", (string?)r["access"]));
+			Assert.Contains(refs, r => ((string?)r["method"])?.EndsWith(".SetState") == true);
+		}
+
+		// A token target auto-detects that it is a field (0x04...), not a method.
+		[DbgFact]
+		public void Field_references_can_be_found_by_token() {
+			var stateToken = (string?)((JArray)Dbg.CallJson("search", new JObject {
+				["module"] = Dbg.FixtureDll(),
+				["query"] = "State",
+				["kind"] = "names",
+			})["hits"]!).First(h => (string?)h["kind"] == "field")["token"];
+			Assert.StartsWith("0x04", stateToken); // FieldDef tokens start 0x04
+
+			var res = Dbg.CallJson("find_references", new JObject {
+				["module"] = Dbg.FixtureDll(),
+				["token"] = stateToken,
+			});
+			Assert.Equal("field", (string?)res["targetKind"]);
+			Assert.NotEmpty((JArray)res["references"]!);
+		}
+
+		// ---- find_references: types ----
+
+		[DbgFact]
+		public void Type_uses_are_found() {
+			var res = Dbg.CallJson("find_references", new JObject {
+				["module"] = Dbg.FixtureDll(),
+				["type"] = "DbgTest.Node",
+			});
+			Assert.Equal("type", (string?)res["targetKind"]);
+			var refs = (JArray)res["references"]!;
+
+			// Inspect and BuildGraph both use Node (construct / return it).
+			Assert.Contains(refs, r => ((string?)r["method"])?.Contains("Inspect") == true);
+			Assert.Contains(refs, r => ((string?)r["method"])?.Contains("BuildGraph") == true);
+		}
+
+		// ---- type_hierarchy ----
+
+		[DbgFact]
+		public void Base_types_are_listed() {
+			var res = Dbg.CallJson("type_hierarchy", new JObject {
+				["module"] = Dbg.FixtureDll(),
+				["type"] = "DbgTest.Dog",
+				["direction"] = "base",
+			});
+			var bases = ((JArray)res["baseTypes"]!).Select(b => (string?)b["name"]).ToArray();
+			Assert.Contains("DbgTest.Animal", bases);
+			Assert.Contains("System.Object", bases);
+		}
+
+		[DbgFact]
+		public void Derived_types_are_found() {
+			var dogFromAnimal = ((JArray)Dbg.CallJson("type_hierarchy", new JObject {
+				["module"] = Dbg.FixtureDll(),
+				["type"] = "DbgTest.Animal",
+				["direction"] = "derived",
+			})["derivedTypes"]!).Select(d => (string?)d["name"]).ToArray();
+			Assert.Contains("DbgTest.Dog", dogFromAnimal);
+
+			// An interface target finds its implementers too.
+			var greeters = ((JArray)Dbg.CallJson("type_hierarchy", new JObject {
+				["module"] = Dbg.FixtureDll(),
+				["type"] = "DbgTest.IGreeter",
+				["direction"] = "derived",
+			})["derivedTypes"]!).Select(d => (string?)d["name"]).ToArray();
+			Assert.Contains("DbgTest.EnglishGreeter", greeters);
+			Assert.Contains("DbgTest.FrenchGreeter", greeters);
+		}
+
+		// ---- resources ----
+
+		[DbgFact]
+		public void Manifest_resources_are_listed() {
+			var res = Dbg.CallJson("list_resources", new JObject { ["module"] = Dbg.FixtureDll() });
+			var rs = (JArray)res["resources"]!;
+			var embedded = rs.FirstOrDefault(r => (string?)r["name"] == "dbgtest.embedded.txt");
+			Assert.NotNull(embedded);
+			Assert.Equal("Embedded", (string?)embedded!["type"]);
+			Assert.True((int)embedded["length"]! > 0);
+		}
+
+		[DbgFact]
+		public void An_embedded_resource_is_extracted_inline() {
+			var res = Dbg.CallJson("extract_resource", new JObject {
+				["module"] = Dbg.FixtureDll(),
+				["name"] = "dbgtest.embedded.txt",
+			});
+			Assert.Contains("dbgtest-embedded-payload", (string?)res["text"]);
+		}
+
+		[DbgFact]
+		public void A_resource_can_be_saved_to_disk() {
+			var tmp = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "dbgtest-res-" + Guid.NewGuid().ToString("N") + ".txt");
+			try {
+				var res = Dbg.CallJson("extract_resource", new JObject {
+					["module"] = Dbg.FixtureDll(),
+					["name"] = "dbgtest.embedded.txt",
+					["save_path"] = tmp,
+				});
+				Assert.Equal(tmp, (string?)res["savedTo"]);
+				Assert.True(System.IO.File.Exists(tmp));
+				Assert.Contains("dbgtest-embedded-payload", System.IO.File.ReadAllText(tmp));
+			}
+			finally {
+				if (System.IO.File.Exists(tmp)) System.IO.File.Delete(tmp);
+			}
+		}
+
+		[DbgFact]
+		public void An_unknown_resource_is_reported() {
+			var error = Dbg.CallExpectingError("extract_resource", new JObject {
+				["module"] = Dbg.FixtureDll(),
+				["name"] = "no.such.resource",
+			});
+			Assert.Contains("resource", error, StringComparison.OrdinalIgnoreCase);
+		}
+
+		// A module path with forward slashes (as JSON callers routinely send) resolves.
+		[DbgFact]
+		public void A_module_path_with_forward_slashes_resolves() {
+			var types = (JArray)Dbg.CallJson("list_types", new JObject {
+				["module"] = Dbg.FixtureDll().Replace('\\', '/'),
+				["filter"] = "DbgTest.*",
+			})["types"]!;
+			Assert.Contains(types, t => (string?)t["name"] == "DbgTest.Program");
+		}
 	}
 }

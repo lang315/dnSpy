@@ -61,7 +61,7 @@ Or add to your MCP client config:
 Call `dnspy_info` at any time to check which instance you reached, whether authentication is on and
 which settings file it is using.
 
-## Tools (40)
+## Tools (46)
 
 Endpoint:
 - `dnspy_info` — which dnSpy this is, its version and port, whether a token is required and where it
@@ -72,12 +72,15 @@ Static analysis (no debug session — read and explore an assembly on disk or op
 - `list_methods` — methods of a type, with metadata tokens and signatures
 - `decompile` — a method (all overloads), a type, or a metadata token → C# (`format: "il"` for IL)
 - `search` — member names (wildcards) and/or string literals used in method bodies, with locations
-- `find_references` — the methods that call a given method (reverse call graph), within the module or
-  every open assembly
+- `find_references` — where a method, field or type is used (callers / field reads-writes / type uses),
+  within the module or every open assembly
 - `find_implementations` — the methods that override or implement a virtual/abstract/interface method
   (the forward direction of the hierarchy), within the module or every open assembly
+- `type_hierarchy` — a type's base types and interfaces, and/or its derived types and implementers
 - `extract_iocs` — URLs, IPs, registry keys, file paths, e-mail addresses and P/Invoke imports found by
   static reading, each tied to the method it appears in; for triage and malware-analysis reporting
+- `list_resources` / `extract_resource` — enumerate manifest resources and extract an embedded one
+  (where packers and obfuscators hide payloads)
 
 Session control:
 - `dbg_status` — is-debugging / running / process list
@@ -96,6 +99,7 @@ Breakpoints:
 - `bp_list`, `bp_remove` (`id` or `all`), `bp_toggle`
 - `mbp_add` / `mbp_list` / `mbp_remove` — module-load breakpoints (break when a module loads)
 - `exc_break` — break when a CLR exception is thrown (all, or a named type)
+- `dbg_run_to` — resume and pause when execution reaches a method (sets a temporary breakpoint)
 
 Inspection (require a paused process):
 - `dbg_threads`, `dbg_modules`
@@ -108,6 +112,11 @@ Inspection (require a paused process):
 - `dbg_set_variable` — assign a new value to a variable
 - `dbg_set_next_statement` — move the instruction pointer to another IL offset
 - `dbg_read_memory` / `dbg_write_memory` — raw process memory as hex
+
+Live / packed analysis (reach into the running debuggee; require a paused process):
+- `dump_module` — dump a loaded module's in-memory image to disk — a packed/protected assembly in its
+  unpacked form — then analyse the file with the static tools
+- `mem_load` — load a module from process memory into dnSpy, then analyse it by name with the static tools
 
 Read-only tools carry a `readOnlyHint` annotation; process-changing tools (`dbg_start`, `dbg_write_memory`, `dbg_set_variable`, …) carry `destructiveHint`.
 

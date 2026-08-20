@@ -89,13 +89,16 @@ namespace dnSpy.MCP.Tools {
 				Search, readOnly: true);
 
 			yield return new ToolDef("find_references",
-				"Find the methods that call a given method (its callers). Identify the target by fully-qualified name (all overloads) or metadata token. Builds a reverse call graph without running the program.",
+				"Find where a method, field or type is used, without running the program. Method → its callers; field → its reads/writes; type → the methods that use it (instantiate, cast, call, catch, local). Identify the target by fully-qualified name (method/field/type) or by metadata token (kind auto-detected).",
 				Schema.Object(
 					("module", Schema.Str("Module file path (of the target), or file name if open in dnSpy"), true),
 					("method", Schema.Str("Fully-qualified target method, e.g. 'MyApp.Program.Add'"), false),
-					("token", Schema.Str("Metadata token of the target method, hex or decimal"), false),
+					("field", Schema.Str("Fully-qualified target field, e.g. 'MyApp.Program.Counter'"), false),
+					("type", Schema.Str("Fully-qualified target type, e.g. 'MyApp.Node'"), false),
+					("token", Schema.Str("Metadata token of a method, field or type (hex or decimal); kind auto-detected"), false),
+					("access", Schema.Str("For a field target: reads | writes | all (default all)"), false),
 					("scope", Schema.Str("'module' (default, the target's module) or 'open' (every assembly open in dnSpy)"), false),
-					("max", Schema.Int("Maximum callers to return (default 200)"), false)),
+					("max", Schema.Int("Maximum results to return (default 200)"), false)),
 				FindReferences, readOnly: true);
 
 			yield return new ToolDef("find_implementations",
@@ -108,6 +111,17 @@ namespace dnSpy.MCP.Tools {
 					("max", Schema.Int("Maximum implementations to return (default 200)"), false)),
 				FindImplementations, readOnly: true);
 
+			yield return new ToolDef("type_hierarchy",
+				"Show a type's base types (up to System.Object) and the interfaces it implements, and/or its derived types (subclasses and interface implementers) within the module or every open assembly.",
+				Schema.Object(
+					("module", Schema.Str("Module file path, or file name if open in dnSpy"), true),
+					("type", Schema.Str("Fully-qualified type, e.g. 'MyApp.Animal'"), false),
+					("token", Schema.Str("Metadata token of the type, hex or decimal"), false),
+					("direction", Schema.Str("base | derived | both (default both)"), false),
+					("scope", Schema.Str("'module' (default) or 'open' — for the derived-types search"), false),
+					("max", Schema.Int("Maximum derived types to return (default 500)"), false)),
+				TypeHierarchy, readOnly: true);
+
 			yield return new ToolDef("extract_iocs",
 				"Extract indicators of compromise from an assembly by pure static reading: URLs, IPs, registry keys, file paths and e-mail addresses in string literals, plus native imports (P/Invoke), each tied to the method it appears in. For triage and malware-analysis reporting — nothing is executed.",
 				Schema.Object(
@@ -115,6 +129,20 @@ namespace dnSpy.MCP.Tools {
 					("categories", Schema.Str("Comma-separated subset of: url, ip, registry, path, email, pinvoke, base64 (default: all but base64)"), false),
 					("max", Schema.Int("Maximum indicators to return (default 500)"), false)),
 				ExtractIocs, readOnly: true);
+
+			yield return new ToolDef("list_resources",
+				"List a module's manifest resources — name, type, visibility, and byte length for embedded ones. Packers and obfuscators often hide payloads or config in resources.",
+				Schema.Object(
+					("module", Schema.Str("Module file path, or file name if open in dnSpy"), true)),
+				ListResources, readOnly: true);
+
+			yield return new ToolDef("extract_resource",
+				"Extract an embedded resource's bytes by name. With 'save_path' it writes the bytes to disk and returns the path; otherwise it returns the text (if printable) or a hex preview. Run list_resources first to get names.",
+				Schema.Object(
+					("module", Schema.Str("Module file path, or file name if open in dnSpy"), true),
+					("name", Schema.Str("Resource name (exact, from list_resources)"), true),
+					("save_path", Schema.Str("Optional file path to write the raw bytes to"), false)),
+				ExtractResource);
 		}
 
 		string Decompile(JObject args) {
@@ -281,45 +309,182 @@ namespace dnSpy.MCP.Tools {
 		string FindReferences(JObject args) {
 			var module = ReqStr(args, "module");
 			var method = (string?)args["method"];
+			var field = (string?)args["field"];
+			var type = (string?)args["type"];
 			var token = (string?)args["token"];
 			var scope = ((string?)args["scope"] ?? "module").ToLowerInvariant();
+			var access = ((string?)args["access"] ?? "all").ToLowerInvariant();
 			var max = Clamp((int?)args["max"] ?? 200, 1, MaxListItems);
 
 			lock (metadataLock) {
 				var mod = MetadataResolver.ResolveModule(documentService.Value, module);
-				var targets = ResolveTargets(mod, method, token);
 				var modules = ModulesForScope(mod, scope);
 
-				var callers = new JArray();
-				long scanned = 0;
-				foreach (var m in modules.SelectMany(EnumerateMethods)) {
-					scanned++;
-					if (!m.HasBody)
-						continue;
-					foreach (var instr in m.Body.Instructions) {
-						if (!IsCall(instr.OpCode.Code) || instr.Operand is not IMethod called || called.IsField)
-							continue;
-						if (!targets.Any(t => Same(called, t)))
-							continue;
-						callers.Add(new JObject {
-							["caller"] = m.FullName,
-							["token"] = Token(m.MDToken),
-							["callee"] = called.FullName,
-							["ilOffset"] = "0x" + instr.Offset.ToString("X"),
-						});
-						break; // one hit per caller method is enough; a method that calls it twice is still one caller
-					}
-					if (callers.Count >= max)
-						break;
+				if (!string.IsNullOrEmpty(field))
+					return FieldReferences(ResolveFields(mod, field!), modules, scope, access, max);
+				if (!string.IsNullOrEmpty(type))
+					return TypeReferences(FindTypeOrThrow(mod, type!), modules, scope, max);
+				if (token is not null) {
+					return ResolveToken(mod, token) switch {
+						MethodDef md => MethodCallers(new[] { md }, modules, scope, max),
+						FieldDef fd => FieldReferences(new[] { fd }, modules, scope, access, max),
+						TypeDef td => TypeReferences(td, modules, scope, max),
+						_ => throw new InvalidOperationException("token must resolve to a method, field or type"),
+					};
 				}
-				return Json(new JObject {
-					["target"] = string.Join(", ", targets.Select(t => t.FullName)),
-					["scope"] = scope,
-					["scannedMethods"] = scanned,
-					["callers"] = callers,
-				});
+				if (!string.IsNullOrEmpty(method))
+					return MethodCallers(MetadataResolver.ResolveMethods(mod, method!), modules, scope, max);
+				throw new ArgumentException("provide 'method', 'field', 'type' or 'token'");
 			}
 		}
+
+		// Methods that call any of the target methods (the original find_references behaviour).
+		static string MethodCallers(MethodDef[] targets, List<ModuleDef> modules, string scope, int max) {
+			var callers = new JArray();
+			long scanned = 0;
+			foreach (var m in modules.SelectMany(EnumerateMethods)) {
+				scanned++;
+				if (!m.HasBody)
+					continue;
+				foreach (var instr in m.Body.Instructions) {
+					if (!IsCall(instr.OpCode.Code) || instr.Operand is not IMethod called || called.IsField)
+						continue;
+					if (!targets.Any(t => Same(called, t)))
+						continue;
+					callers.Add(new JObject {
+						["caller"] = m.FullName,
+						["token"] = Token(m.MDToken),
+						["callee"] = called.FullName,
+						["ilOffset"] = "0x" + instr.Offset.ToString("X"),
+					});
+					break; // one hit per caller method is enough
+				}
+				if (callers.Count >= max)
+					break;
+			}
+			return Json(new JObject {
+				["target"] = string.Join(", ", targets.Select(t => t.FullName)),
+				["scope"] = scope,
+				["scannedMethods"] = scanned,
+				["callers"] = callers,
+			});
+		}
+
+		// Methods that read/write any of the target fields. Mirrors dnSpy's FieldAccessNode.
+		static string FieldReferences(FieldDef[] targets, List<ModuleDef> modules, string scope, string access, int max) {
+			var wantReads = access is "all" or "reads";
+			var wantWrites = access is "all" or "writes";
+			if (!wantReads && !wantWrites)
+				throw new ArgumentException("'access' must be reads, writes or all");
+			var refs = new JArray();
+			long scanned = 0;
+			foreach (var m in modules.SelectMany(EnumerateMethods)) {
+				scanned++;
+				if (!m.HasBody)
+					continue;
+				foreach (var instr in m.Body.Instructions) {
+					var acc = FieldAccess(instr.OpCode.Code);
+					if (acc is null || instr.Operand is not IField f)
+						continue;
+					var show = acc switch { "read" => wantReads, "write" => wantWrites, _ => true };
+					if (!show || !targets.Any(t => SameField(f, t)))
+						continue;
+					refs.Add(new JObject {
+						["method"] = Dotted(m),
+						["token"] = Token(m.MDToken),
+						["access"] = acc,
+						["field"] = f.FullName,
+						["ilOffset"] = "0x" + instr.Offset.ToString("X"),
+					});
+					break; // one row per method
+				}
+				if (refs.Count >= max)
+					break;
+			}
+			return Json(new JObject {
+				["target"] = string.Join(", ", targets.Select(t => t.FullName)),
+				["targetKind"] = "field",
+				["scope"] = scope,
+				["scannedMethods"] = scanned,
+				["references"] = refs,
+			});
+		}
+
+		// Methods that use a target type — instantiate/cast/call/field-access/local/catch. Mirrors TypeUsedByNode.
+		static string TypeReferences(TypeDef target, List<ModuleDef> modules, string scope, int max) {
+			var refs = new JArray();
+			long scanned = 0;
+			foreach (var m in modules.SelectMany(EnumerateMethods)) {
+				scanned++;
+				if (m.HasBody && UsesType(m, target)) {
+					refs.Add(new JObject { ["method"] = Dotted(m), ["token"] = Token(m.MDToken) });
+					if (refs.Count >= max)
+						break;
+				}
+			}
+			return Json(new JObject {
+				["target"] = target.FullName,
+				["targetKind"] = "type",
+				["scope"] = scope,
+				["scannedMethods"] = scanned,
+				["references"] = refs,
+			});
+		}
+
+		static FieldDef[] ResolveFields(ModuleDef mod, string fullName) {
+			var idx = fullName.LastIndexOf('.');
+			if (idx <= 0)
+				throw new ArgumentException("field must be fully qualified, e.g. 'Namespace.Type.Field'");
+			var typeName = fullName.Substring(0, idx);
+			var type = MetadataResolver.FindType(mod, typeName)
+				?? throw new InvalidOperationException($"type not found: {typeName}");
+			var name = fullName.Substring(idx + 1);
+			var fields = type.Fields.Where(f => f.Name == name).ToArray();
+			if (fields.Length == 0)
+				throw new InvalidOperationException($"field not found: {name} in {type.FullName}");
+			return fields;
+		}
+
+		static TypeDef FindTypeOrThrow(ModuleDef mod, string type) =>
+			MetadataResolver.FindType(mod, type) ?? throw new InvalidOperationException($"type not found: {type}");
+
+		// Field-access classification: read / write / ref (address or token, usable either way), or null.
+		static string? FieldAccess(Code code) =>
+			code is Code.Ldfld or Code.Ldsfld ? "read" :
+			code is Code.Stfld or Code.Stsfld ? "write" :
+			code is Code.Ldflda or Code.Ldsflda or Code.Ldtoken ? "ref" :
+			null;
+
+		static bool SameField(IField f, FieldDef target) =>
+			f.Name == target.Name && f.ResolveFieldDef() is FieldDef fd && (fd == target || FieldKey(fd) == FieldKey(target));
+
+		static string FieldKey(FieldDef f) =>
+			f.MDToken.Raw.ToString("X8") + "@" + (f.Module?.Location?.ToLowerInvariant() ?? "");
+
+		// A pragmatic "type is used in this body": any type/field/method operand whose (declaring) type is the
+		// target, plus locals and catch types. Does not recurse into generic arguments (a List<T> param won't match).
+		static bool UsesType(MethodDef m, TypeDef target) {
+			foreach (var instr in m.Body.Instructions) {
+				ITypeDefOrRef? ot = instr.Operand switch {
+					ITypeDefOrRef tr => tr,
+					IField fr => fr.DeclaringType,
+					IMethod mr => mr.DeclaringType,
+					_ => null,
+				};
+				if (ot is not null && SameType(ot, target))
+					return true;
+			}
+			if (m.Body.HasVariables)
+				foreach (var v in m.Body.Variables)
+					if (v.Type?.ToTypeDefOrRef() is ITypeDefOrRef vt && SameType(vt, target))
+						return true;
+			foreach (var eh in m.Body.ExceptionHandlers)
+				if (eh.CatchType is not null && SameType(eh.CatchType, target))
+					return true;
+			return false;
+		}
+
+		static bool SameType(ITypeDefOrRef t, TypeDef target) => new SigComparer().Equals(target, t.GetScopeType());
 
 		static IEnumerable<MethodDef> EnumerateMethods(ModuleDef mod) {
 			foreach (var t in mod.GetTypes())
@@ -596,6 +761,130 @@ namespace dnSpy.MCP.Tools {
 		// Every category, including the non-regex pinvoke; the default sweep is all of them but the noisy one.
 		static readonly string[] IocCategories = IocPatterns.Select(p => p.name).Append("pinvoke").ToArray();
 		static IEnumerable<string> DefaultCategories() => IocCategories.Where(c => c != NoisyCategory);
+
+		string TypeHierarchy(JObject args) {
+			var module = ReqStr(args, "module");
+			var type = (string?)args["type"];
+			var token = (string?)args["token"];
+			var direction = ((string?)args["direction"] ?? "both").ToLowerInvariant();
+			var scope = ((string?)args["scope"] ?? "module").ToLowerInvariant();
+			var max = Clamp((int?)args["max"] ?? 500, 1, MaxListItems);
+			var wantBase = direction is "both" or "base";
+			var wantDerived = direction is "both" or "derived";
+			if (!wantBase && !wantDerived)
+				throw new ArgumentException("'direction' must be base, derived or both");
+
+			lock (metadataLock) {
+				var mod = MetadataResolver.ResolveModule(documentService.Value, module);
+				var td = ResolveTypeTarget(mod, type, token);
+				var result = new JObject { ["type"] = td.FullName, ["token"] = Token(td.MDToken), ["kind"] = TypeKind(td) };
+
+				if (wantBase) {
+					var bases = new JArray();
+					for (var bt = td.BaseType; bt is not null; ) {
+						bases.Add(new JObject { ["name"] = bt.FullName, ["token"] = bt is TypeDef btd ? Token(btd.MDToken) : null });
+						var rd = bt.ResolveTypeDef();
+						if (rd is null) break;
+						bt = rd.BaseType;
+					}
+					result["baseTypes"] = bases;
+					result["interfaces"] = new JArray(td.Interfaces.Select(i => (object)i.Interface.FullName).ToArray());
+				}
+
+				if (wantDerived) {
+					var derived = new JArray();
+					long scanned = 0;
+					foreach (var t in ModulesForScope(mod, scope).SelectMany(m => m.GetTypes())) {
+						scanned++;
+						if (SameType(t, td))
+							continue;
+						if (TypesHierarchyHelpers.IsBaseType(td, t, resolveTypeArguments: false) || ImplementsInterface(t, td)) {
+							derived.Add(new JObject { ["name"] = t.FullName, ["token"] = Token(t.MDToken), ["kind"] = TypeKind(t) });
+							if (derived.Count >= max) break;
+						}
+					}
+					result["scannedTypes"] = scanned;
+					result["derivedTypes"] = derived;
+				}
+				return Json(result);
+			}
+		}
+
+		static TypeDef ResolveTypeTarget(ModuleDef mod, string? type, string? token) {
+			if (token is not null)
+				return ResolveToken(mod, token) as TypeDef
+					?? throw new InvalidOperationException("token does not resolve to a type");
+			if (!string.IsNullOrEmpty(type))
+				return FindTypeOrThrow(mod, type!);
+			throw new ArgumentException("provide 'type' or 'token'");
+		}
+
+		// Does `t` (or a base type) implement interface `iface`?
+		static bool ImplementsInterface(TypeDef t, TypeDef iface) {
+			if (!iface.IsInterface)
+				return false;
+			foreach (var st in TypesHierarchyHelpers.GetTypeAndBaseTypes(t)) {
+				var std = st.Resolve();
+				if (std is null)
+					break;
+				foreach (var ii in std.Interfaces)
+					if (new SigComparer().Equals(ii.Interface.GetScopeType(), iface))
+						return true;
+			}
+			return false;
+		}
+
+		string ListResources(JObject args) {
+			var module = ReqStr(args, "module");
+			lock (metadataLock) {
+				var mod = MetadataResolver.ResolveModule(documentService.Value, module);
+				var arr = new JArray();
+				foreach (var r in mod.Resources) {
+					var o = new JObject {
+						["name"] = r.Name?.String,
+						["type"] = r.ResourceType.ToString(),
+						["visibility"] = r.Attributes.ToString(),
+					};
+					if (r is EmbeddedResource er)
+						o["length"] = er.Length;
+					arr.Add(o);
+				}
+				return Json(new JObject { ["module"] = mod.Name?.String, ["count"] = arr.Count, ["resources"] = arr });
+			}
+		}
+
+		string ExtractResource(JObject args) {
+			var module = ReqStr(args, "module");
+			var name = ReqStr(args, "name");
+			var savePath = (string?)args["save_path"];
+			lock (metadataLock) {
+				var mod = MetadataResolver.ResolveModule(documentService.Value, module);
+				if (mod.Resources.FirstOrDefault(r => r.Name?.String == name) is not EmbeddedResource res)
+					throw new InvalidOperationException($"no embedded resource named '{name}' (or it is not an embedded resource)");
+				var bytes = res.CreateReader().ToArray();
+				if (!string.IsNullOrEmpty(savePath)) {
+					System.IO.File.WriteAllBytes(savePath!, bytes);
+					return Json(new JObject { ["name"] = name, ["length"] = bytes.Length, ["savedTo"] = savePath });
+				}
+				var o = new JObject { ["name"] = name, ["length"] = bytes.Length };
+				if (LooksTextual(bytes))
+					o["text"] = System.Text.Encoding.UTF8.GetString(bytes, 0, Math.Min(bytes.Length, MaxDecompileChars));
+				else
+					o["hexHead"] = BitConverter.ToString(bytes, 0, Math.Min(bytes.Length, 256)).Replace("-", "");
+				return Json(o);
+			}
+		}
+
+		// A cheap "is this printable text" heuristic for inline resource preview.
+		static bool LooksTextual(byte[] b) {
+			int n = Math.Min(b.Length, 512);
+			for (int i = 0; i < n; i++) {
+				var c = b[i];
+				if (c == 0 || c < 0x09 || (c > 0x0D && c < 0x20 && c != 0x1B))
+					return false;
+			}
+			return true;
+		}
 
 		IDecompiler DecompilerFor(string? format) {
 			if (string.IsNullOrEmpty(format) || string.Equals(format, "csharp", StringComparison.OrdinalIgnoreCase))

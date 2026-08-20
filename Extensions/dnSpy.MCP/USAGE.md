@@ -148,9 +148,12 @@ Kết quả trả về là JSON dạng text. Lỗi trả về dưới dạng MCP
 | `list_methods` | `module`, `type` (bắt buộc) | Liệt kê method của 1 type kèm token + chữ ký — đưa token cho `bp_add`/`decompile`. |
 | `decompile` | `module` (bắt buộc), `method`\|`type`\|`token`, `format` | Dịch ngược 1 method (mọi overload)/type/token → C#; `format="il"` để xem IL (opcode + offset, hữu ích với code bị obfuscate). |
 | `search` | `module`, `query` (bắt buộc), `kind`, `max` | Tìm tên member (`*`/`?`) và/hoặc chuỗi literal trong thân method, kèm vị trí + token. |
-| `find_references` | `module` (bắt buộc), `method`\|`token`, `scope`, `max` | Các method **gọi** method đích (call graph ngược); `scope="open"` để quét mọi assembly đang mở. |
+| `find_references` | `module` (bắt buộc), `method`\|`field`\|`type`\|`token`, `access`, `scope`, `max` | Nơi một **method/field/type** được dùng: method → caller; field → đọc/ghi (`access`=reads\|writes\|all); type → method dùng nó (khởi tạo/cast/gọi/local/catch). `token` tự nhận loại. `scope="open"` quét mọi assembly đang mở. |
 | `find_implementations` | `module` (bắt buộc), `method`\|`token`, `scope`, `max` | Các method **override/hiện thực** một method ảo/abstract/interface (chiều xuôi của cây kế thừa) — bổ sung cho `find_references`. |
+| `type_hierarchy` | `module` (bắt buộc), `type`\|`token`, `direction`, `scope`, `max` | Base type + interface của 1 type, và/hoặc type dẫn xuất + implementer. `direction`=base\|derived\|both. |
 | `extract_iocs` | `module` (bắt buộc), `categories`, `max` | Trích IOC bằng đọc tĩnh: URL, IP, khóa registry, đường dẫn file, email trong chuỗi literal + import P/Invoke, mỗi cái gắn với method chứa nó. Phục vụ triage / báo cáo phân tích mã độc. `categories` lọc theo `url,ip,registry,path,email,pinvoke,base64` (mặc định tất cả trừ `base64`). |
+| `list_resources` | `module` (bắt buộc) | Liệt kê manifest resource (tên, kiểu, visibility, độ dài với resource nhúng) — nơi packer/obfuscator hay giấu payload. |
+| `extract_resource` | `module`, `name` (bắt buộc), `save_path` | Trích byte của 1 embedded resource. Có `save_path` thì ghi ra đĩa; không thì trả text (nếu in được) hoặc hex preview. |
 
 ### Điều khiển phiên
 
@@ -167,6 +170,7 @@ Kết quả trả về là JSON dạng text. Lỗi trả về dưới dạng MCP
 | `dbg_restart` | — | Khởi động lại phiên hiện tại. |
 | `dbg_step` | `kind` = `into`\|`over`\|`out` (bắt buộc), `timeout_ms` | Step luồng đang paused và chờ hoàn thành, trả về frame trên cùng. |
 | `dbg_wait_for_break` | `timeout_ms` | Chặn cho tới khi có tiến trình paused (trúng breakpoint / step xong / break), hoặc timeout. |
+| `dbg_run_to` | `module` (bắt buộc), `method`\|`token`, `il_offset`, `timeout_ms` | Chạy tiếp tới khi tới 1 method rồi dừng ở đó (đặt breakpoint tạm, continue, chờ, gỡ). Cần phiên đang chạy. |
 
 ### Breakpoint
 
@@ -201,6 +205,15 @@ Kết quả trả về là JSON dạng text. Lỗi trả về dưới dạng MCP
 | `dbg_write_memory` | `address`, `bytes` (bắt buộc), `pid` | Ghi byte thô (hex) vào memory tiến trình. |
 
 Tool chỉ đọc mang annotation `readOnlyHint`; tool thay đổi tiến trình (`dbg_start`, `dbg_write_memory`, `dbg_set_variable`, …) mang `destructiveHint` để client cảnh báo.
+
+### Phân tích live / packed (cần tiến trình đang paused)
+
+Với app bị **pack/bảo vệ** — file trên đĩa không parse được nhưng code thật đã được giải nén trong bộ nhớ.
+
+| Tool | Tham số | Mô tả |
+|---|---|---|
+| `dump_module` | `module` (bắt buộc, tên từ `dbg_modules`), `save_path` | Dump ảnh in-memory của 1 module đã nạp ra đĩa (dạng đã unpack), rồi chĩa các tool tĩnh (`list_types`/`decompile`/`search`/`extract_iocs`) vào file đó. |
+| `mem_load` | `module` (bắt buộc) | Nạp module từ bộ nhớ tiến trình (dạng in-memory) vào dnSpy, rồi phân tích theo tên bằng các tool tĩnh. Giống `dump_module` nhưng giữ trong dnSpy thay vì ghi file. |
 
 ### Nhận sự kiện realtime (SSE)
 

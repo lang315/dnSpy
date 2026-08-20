@@ -10,6 +10,8 @@ namespace DbgTest {
 	public static class Program {
 		// Asserted by the statics tests.
 		public static int Counter;
+		// Written by SetState, read by ReadState — a read/write pair in distinct methods for field find_references.
+		public static int State;
 		public static readonly int[] Numbers = { 10, 20, 30, 40, 50 };
 
 		/// <summary>Writable target for the memory-write round trip.</summary>
@@ -150,14 +152,29 @@ namespace DbgTest {
 			return url + " " + ip + " " + registry + " " + path + " " + email;
 		}
 
+		/// <summary>Writes the State field — the write site for field find_references.</summary>
+		public static void SetState(int v) => State = v;
+
+		/// <summary>Reads the State field — the read site for field find_references.</summary>
+		public static int ReadState() => State * 2;
+
+		/// <summary>Reads the embedded resource — a read site and the target for extract_resource.</summary>
+		public static string ReadEmbedded() {
+			using var s = typeof(Program).Assembly.GetManifestResourceStream("dbgtest.embedded.txt");
+			using var r = new System.IO.StreamReader(s!);
+			return r.ReadToEnd();
+		}
+
 		/// <summary>
-		/// Exercises the interface implementations, the virtual override and the P/Invoke so the compiler
-		/// emits them all; find_implementations and extract_iocs then read them off disk.
+		/// Exercises the interface implementations, the virtual override, the P/Invoke, the State field and
+		/// the embedded resource so the compiler emits them all; the static tools then read them off disk.
 		/// </summary>
 		static void Warmup() {
 			IGreeter[] greeters = { new EnglishGreeter(), new FrenchGreeter() };
 			Animal animal = new Dog();
-			GC.KeepAlive(Indicators() + greeters[0].Greet() + greeters[1].Greet() + animal.Speak() + NativeGetTickCount());
+			SetState(7);
+			GC.KeepAlive(Indicators() + greeters[0].Greet() + greeters[1].Greet() + animal.Speak()
+				+ NativeGetTickCount() + ReadState() + ReadEmbedded());
 		}
 	}
 

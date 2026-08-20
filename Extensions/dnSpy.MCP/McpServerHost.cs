@@ -28,6 +28,7 @@ using dnSpy.Contracts.Debugger.Breakpoints.Code;
 using dnSpy.Contracts.Debugger.Breakpoints.Modules;
 using dnSpy.Contracts.Debugger.DotNet.Breakpoints.Code;
 using dnSpy.Contracts.Debugger.DotNet.Code;
+using dnSpy.Contracts.Debugger.DotNet.Metadata;
 using dnSpy.Contracts.Debugger.Evaluation;
 using dnSpy.Contracts.Debugger.Exceptions;
 using dnSpy.Contracts.Decompiler;
@@ -58,6 +59,7 @@ namespace dnSpy.MCP {
 		readonly Lazy<DbgExceptionSettingsService> exceptionService;
 		readonly Lazy<DbgModuleBreakpointsService> moduleBpService;
 		readonly Lazy<IDecompilerService> decompilerService;
+		readonly Lazy<DbgMetadataService> dbgMetadataService;
 
 		McpServer? server;
 
@@ -67,7 +69,8 @@ namespace dnSpy.MCP {
 			Lazy<DbgCodeBreakpointHitCountService> hitCountService, Lazy<DbgLanguageService> languageService,
 			Lazy<DbgDotNetCodeLocationFactory> codeLocationFactory, Lazy<IModuleIdProvider> moduleIdProvider,
 			Lazy<IDsDocumentService> documentService, Lazy<DbgExceptionSettingsService> exceptionService,
-			Lazy<DbgModuleBreakpointsService> moduleBpService, Lazy<IDecompilerService> decompilerService) {
+			Lazy<DbgModuleBreakpointsService> moduleBpService, Lazy<IDecompilerService> decompilerService,
+			Lazy<DbgMetadataService> dbgMetadataService) {
 			this.dbgManager = dbgManager;
 			this.attachService = attachService;
 			this.bpService = bpService;
@@ -80,6 +83,7 @@ namespace dnSpy.MCP {
 			this.exceptionService = exceptionService;
 			this.moduleBpService = moduleBpService;
 			this.decompilerService = decompilerService;
+			this.dbgMetadataService = dbgMetadataService;
 		}
 
 		public void Start() {
@@ -103,6 +107,8 @@ namespace dnSpy.MCP {
 				// Static analysis: no debug engine, so these are constructed with only the document and
 				// decompiler services and run off the dispatcher.
 				tools.AddRange(new StaticTools(documentService, decompilerService).Create());
+				// Live/packed analysis: reaches into the debuggee to dump or load a module from memory.
+				tools.AddRange(new LiveModuleTools(dbg, dbgMetadataService).Create());
 				// Counts the live list rather than a snapshot, so the reported total covers every tool
 				// including this one — the count is not knowable while the list is still being built.
 				tools.AddRange(new InfoTools(port, () => auth.Token is not null,

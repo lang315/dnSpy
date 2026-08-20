@@ -102,6 +102,16 @@ namespace dnSpy.MCP.Tools {
 					("id", Schema.Int("Breakpoint id"), true),
 					("enabled", Schema.Bool("New enabled state"), true)),
 				Toggle);
+
+			yield return new ToolDef("dbg_run_to",
+				"Resume the debugged process and run until it reaches a method (by name or module+token), then pause there. Sets a temporary breakpoint, continues, waits for the hit, and removes the breakpoint. Requires an active session (dbg_start first).",
+				Schema.Object(
+					("module", Schema.Str("Module file path, or file name if open in dnSpy"), true),
+					("method", Schema.Str("Fully-qualified method to run to (every overload)"), false),
+					("token", Schema.Str("Method metadata token to run to (hex or decimal)"), false),
+					("il_offset", Schema.Str("IL offset within the method (default 0)"), false),
+					("timeout_ms", Schema.Int("Max time to wait for the target to be reached (default 30000)"), false)),
+				RunTo);
 		}
 
 		string Add(JObject args) {
@@ -222,6 +232,74 @@ namespace dnSpy.MCP.Tools {
 				bp.IsEnabled = enabled;
 				return $"breakpoint {id} {(enabled ? "enabled" : "disabled")}";
 			});
+		}
+
+		// Resume and run to a target method, then pause. Uses the target breakpoint's hit-count rising as the
+		// "we got there" signal, which sidesteps the RunAll-is-async race (a naive wait for !IsRunning right
+		// after RunAll can return on the *previous* pause before the resume takes effect).
+		string RunTo(JObject args) {
+			var module = (string?)args["module"] ?? throw new ArgumentException("'module' is required");
+			var method = (string?)args["method"];
+			var tokenStr = (string?)args["token"];
+			var offset = args["il_offset"] is { } o ? ParseUInt((string?)o, "il_offset") : 0u;
+			var timeout = Clamp((int?)args["timeout_ms"] ?? 30000, 100, 300000);
+
+			var (ids, baseline) = dbg.Invoke(() => {
+				if (!dbg.DbgManager.IsDebugging)
+					throw new InvalidOperationException("not debugging; start a session first (dbg_start), then run_to");
+				var moduleDef = ResolveModuleDef(module);
+				var settings = MakeSettings(true, null);
+				var made = new List<DbgCodeBreakpoint>();
+				if (tokenStr is not null) {
+					var bp = bpFactory.Value.Create(moduleIdProvider.Value.Create(moduleDef), ParseUInt(tokenStr, "token"), offset, settings);
+					if (bp is not null)
+						made.Add(bp);
+				}
+				else if (!string.IsNullOrEmpty(method)) {
+					var infos = ResolveMethods(moduleDef, method!).Select(m => new DbgCodeBreakpointInfo(
+						codeLocationFactory.Value.Create(moduleIdProvider.Value.Create(m.Module), m.MDToken.Raw, offset), settings)).ToArray();
+					made.AddRange(bpService.Value.Add(infos));
+				}
+				else
+					throw new ArgumentException("provide 'method' or 'token'");
+				if (made.Count == 0)
+					throw new InvalidOperationException("a breakpoint already exists at the target; remove it, or use dbg_continue + dbg_wait_for_break");
+				return (made.Select(b => b.Id).ToArray(), made.Sum(b => hitCountService.Value.GetHitCount(b) ?? 0));
+			});
+
+			dbg.DbgManager.RunAll();
+
+			var sw = System.Diagnostics.Stopwatch.StartNew();
+			var reached = false;
+			while (sw.ElapsedMilliseconds < timeout) {
+				if (dbg.Invoke(() => dbg.DbgManager.IsDebugging && dbg.DbgManager.IsRunning == false
+						&& ids.Sum(HitCountOf) > baseline)) {
+					reached = true;
+					break;
+				}
+				System.Threading.Thread.Sleep(100);
+			}
+
+			return dbg.Invoke(() => {
+				var totalHits = ids.Sum(HitCountOf);
+				foreach (var id in ids)
+					bpService.Value.Breakpoints.FirstOrDefault(b => b.Id == id)?.Remove();
+				var result = new JObject {
+					["reached"] = reached,
+					["breakpointsSet"] = ids.Length,
+					["totalHits"] = totalHits,
+					["isPaused"] = dbg.DbgManager.IsDebugging && dbg.DbgManager.IsRunning == false,
+				};
+				if (!reached)
+					result["note"] = "target not reached within the timeout (the process may have exited, or the location was never executed)";
+				return Json(result);
+			});
+		}
+
+		// Live hit count of a breakpoint by id (0 if it is gone). Must be called on the debugger dispatcher.
+		int HitCountOf(int id) {
+			var bp = bpService.Value.Breakpoints.FirstOrDefault(b => b.Id == id);
+			return bp is null ? 0 : hitCountService.Value.GetHitCount(bp) ?? 0;
 		}
 
 		JObject Describe(DbgCodeBreakpoint bp) {
