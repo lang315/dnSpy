@@ -115,6 +115,11 @@ namespace dnSpy.MCP {
 				// decrypt_strings straddles both halves: static call-site discovery (documentService, like
 				// StaticTools) plus func-eval in the paused process (dbg + languageService, like dbg_eval).
 				tools.AddRange(new DecryptTools(dbg, documentService, languageService).Create());
+				// heap_stats/find/object walk the paused debuggee's managed GC heap with ClrMD passive —
+				// the same coexisting-with-CorDebug attach dnSpy's own DAC provider uses. Only a quick
+				// {pid,bitness,paused} snapshot goes through the dispatcher (DbgAccess); the multi-second
+				// heap walk runs on the request thread so it neither blocks the dispatcher nor hits its timeout.
+				tools.AddRange(new HeapTools(dbg).Create());
 				// Counts the live list rather than a snapshot, so the reported total covers every tool
 				// including this one — the count is not knowable while the list is still being built.
 				tools.AddRange(new InfoTools(port, () => auth.Token is not null,
