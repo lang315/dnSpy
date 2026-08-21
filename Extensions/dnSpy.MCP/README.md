@@ -61,7 +61,7 @@ Or add to your MCP client config:
 Call `dnspy_info` at any time to check which instance you reached, whether authentication is on and
 which settings file it is using.
 
-## Tools (45)
+## Tools (46)
 
 Endpoint:
 - `dnspy_info` — which dnSpy this is, its version and port, whether a token is required and where it
@@ -113,6 +113,9 @@ Inspection (require a paused process):
 - `dbg_set_variable` — assign a new value to a variable
 - `dbg_set_next_statement` — move the instruction pointer to another IL offset
 - `dbg_read_memory` / `dbg_write_memory` — raw process memory as hex
+- `decrypt_strings` — recover obfuscated string constants: find a decryptor method's call sites, read the
+  constant argument at each, and (in a paused process) func-evaluate the decryptor to get the plaintext;
+  `dry_run` lists the call sites and arguments without a session
 
 Read-only tools carry a `readOnlyHint` annotation; process-changing tools (`dbg_start`, `dbg_write_memory`, `dbg_set_variable`, …) carry `destructiveHint`.
 

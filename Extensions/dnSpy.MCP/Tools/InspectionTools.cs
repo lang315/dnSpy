@@ -35,14 +35,10 @@ namespace dnSpy.MCP.Tools {
 	/// <summary>Read-only inspection of a paused debuggee: threads, call stack, locals, modules, eval.</summary>
 	sealed class InspectionTools {
 		// Evaluation can run user code (property getters, ToString) on the single debug-engine thread,
-		// so the 10s default in DbgAccess.Invoke is too aggressive here; give eval-based tools more room.
+		// so the 10s default in DbgAccess.Invoke is too aggressive here; give the frame-formatting read
+		// in CallStack more room. Frame resolution and expression eval share the same budget via
+		// FrameEvaluator, which keeps its own copy of this timeout.
 		const int EvalTimeoutMs = 60000;
-
-		// dnSpy's own func-eval cap (DbgLanguage.DefaultFuncEvalTimeout) is one second, which is far
-		// too short for an agent calling a real method — it reports "Evaluation timed out" long before
-		// the marshalling timeout above matters. Cap below EvalTimeoutMs so a slow evaluation fails
-		// with the engine's own message rather than as a dispatcher timeout.
-		static readonly TimeSpan FuncEvalTimeout = TimeSpan.FromSeconds(30);
 
 		// Format numbers in decimal. Without this the output follows dnSpy's UI "hexadecimal display"
 		// toggle, so the same expression answers 7 or 0x00000007 depending on a setting the agent
@@ -69,12 +65,14 @@ namespace dnSpy.MCP.Tools {
 		readonly DbgAccess dbg;
 		readonly Lazy<DbgLanguageService> languageService;
 		readonly Lazy<DbgDotNetCodeLocationFactory> codeLocationFactory;
+		readonly FrameEvaluator frameEval;
 
 		public InspectionTools(DbgAccess dbg, Lazy<DbgLanguageService> languageService,
 			Lazy<DbgDotNetCodeLocationFactory> codeLocationFactory) {
 			this.dbg = dbg;
 			this.languageService = languageService;
 			this.codeLocationFactory = codeLocationFactory;
+			frameEval = new FrameEvaluator(dbg, languageService);
 		}
 
 		DbgManager Mgr => dbg.DbgManager;
@@ -172,7 +170,7 @@ namespace dnSpy.MCP.Tools {
 			var threadId = (ulong?)(long?)args["thread_id"];
 			var maxFrames = Clamp((int?)args["max_frames"] ?? 200, 1, 1000);
 			return dbg.Invoke(() => {
-				var thread = ResolveThread(threadId);
+				var thread = frameEval.ResolveThread(threadId);
 				var language = languageService.Value.GetCurrentLanguage(thread.Runtime.RuntimeKindGuid);
 				var frames = thread.GetFrames(maxFrames);
 				var writer = new DbgStringBuilderTextWriter();
@@ -203,29 +201,13 @@ namespace dnSpy.MCP.Tools {
 			}, EvalTimeoutMs);
 		}
 
-		// Every eval-based tool resolves the frame (from frame_index/thread_id), creates a language
-		// context + eval info on the dispatcher, runs its body, and closes the context in a finally.
-		// Only the body differs, so it takes (evalInfo, language) and returns the text result.
+		// Every eval-based tool resolves the frame (from frame_index/thread_id) and runs its body inside a
+		// language evaluation context. That plumbing now lives in FrameEvaluator (shared with
+		// decrypt_strings); here we only pull the two frame selectors out of the JSON arguments.
 		string WithFrame(JObject args, Func<DbgEvaluationInfo, DbgLanguage, string> body) {
 			var frameIndex = (int?)args["frame_index"] ?? 0;
 			var threadId = (ulong?)(long?)args["thread_id"];
-			return dbg.Invoke(() => {
-				var (frame, language) = ResolveFrame(threadId, frameIndex);
-				// Deliberately NOT NoMethodBody. That option skips the decompilation this context needs:
-				// measured, it leaves dbg_locals empty and every expression unresolvable. It is worth
-				// stating because that decompilation is the same path dnSpy's own Locals window runs,
-				// and it is where dnSpy sometimes faults — but the alternative is a tool that returns
-				// nothing.
-				var context = language.CreateContext(frame, funcEvalTimeout: FuncEvalTimeout,
-					cancellationToken: CancellationToken.None);
-				try {
-					var evalInfo = new DbgEvaluationInfo(context, frame, CancellationToken.None);
-					return body(evalInfo, language);
-				}
-				finally {
-					context.Close();
-				}
-			}, EvalTimeoutMs);
+			return frameEval.WithFrame(threadId, frameIndex, body);
 		}
 
 		string Locals(JObject args) => WithFrame(args, (evalInfo, language) => {
@@ -246,23 +228,12 @@ namespace dnSpy.MCP.Tools {
 		string Eval(JObject args) {
 			var expression = (string?)args["expression"] ?? throw new ArgumentException("'expression' is required");
 			return WithFrame(args, (evalInfo, language) => {
-				var ee = language.ExpressionEvaluator;
-				var result = ee.Evaluate(evalInfo, expression, DbgEvaluationOptions.Expression, ee.CreateExpressionEvaluatorState());
-				if (result.Error is not null)
-					throw new InvalidOperationException(result.Error);
-				var value = result.Value!;
-				try {
-					var writer = new DbgStringBuilderTextWriter();
-					language.Formatter.FormatValue(evalInfo, writer, value, ValueOptions, null);
-					return Json(new JObject {
-						["expression"] = expression,
-						["value"] = writer.Text,
-						["isThrownException"] = result.IsThrownException,
-					});
-				}
-				finally {
-					value.Close();
-				}
+				var (value, isThrownException) = frameEval.Evaluate(evalInfo, language, expression);
+				return Json(new JObject {
+					["expression"] = expression,
+					["value"] = value,
+					["isThrownException"] = isThrownException,
+				});
 			});
 		}
 
@@ -351,7 +322,7 @@ namespace dnSpy.MCP.Tools {
 			var offset = ParseUInt((string?)args["il_offset"], "il_offset");
 			var threadId = (ulong?)(long?)args["thread_id"];
 			return dbg.Invoke(() => {
-				var thread = ResolveThread(threadId);
+				var thread = frameEval.ResolveThread(threadId);
 				if (thread.Process.State != DbgProcessState.Paused)
 					throw new InvalidOperationException("thread's process is not paused");
 				var frame = thread.GetTopStackFrame()
@@ -381,66 +352,6 @@ namespace dnSpy.MCP.Tools {
 			writer.Reset();
 			node.FormatValue(evalInfo, writer, ValueOptions, null);
 			return writer.Text;
-		}
-
-		DbgThread ResolveThread(ulong? threadId) {
-			if (threadId is null)
-				return DefaultThread();
-			foreach (var p in Mgr.Processes)
-				foreach (var t in p.Threads)
-					if (t.Id == threadId.Value)
-						return t;
-			throw new InvalidOperationException($"no thread with id {threadId.Value}");
-		}
-
-		/// <summary>
-		/// The thread to inspect when the caller named none.
-		///
-		/// CurrentThread.Current is the right answer almost always, but it is not pinned to the thread
-		/// that hit the breakpoint: it drifts, and a caller that lands on a runtime thread with no
-		/// managed frames gets "frame index 0 out of range (0 frames)" while the process is sitting on
-		/// its breakpoint. An agent has no way to tell that apart from a genuinely empty stack. Prefer
-		/// the current thread when it can answer, and otherwise pick a paused thread that can.
-		/// </summary>
-		DbgThread DefaultThread() {
-			var current = Mgr.CurrentThread.Current;
-			if (current is not null && HasFrames(current))
-				return current;
-
-			foreach (var p in Mgr.Processes) {
-				if (p.State != DbgProcessState.Paused)
-					continue;
-				foreach (var t in p.Threads) {
-					if (HasFrames(t))
-						return t;
-				}
-			}
-
-			// Keep the original message: no thread could answer, which is what the caller needs to know.
-			return current ?? throw new InvalidOperationException("no current thread; is a process paused?");
-		}
-
-		static bool HasFrames(DbgThread thread) {
-			try {
-				return thread.Process.State == DbgProcessState.Paused && thread.GetFrames(1).Length > 0;
-			}
-			catch (Exception) {
-				// A thread that faults while being asked is not one to hand back.
-				return false;
-			}
-		}
-
-		(DbgStackFrame frame, DbgLanguage language) ResolveFrame(ulong? threadId, int frameIndex) {
-			if (frameIndex < 0)
-				throw new ArgumentException("'frame_index' must be >= 0");
-			var thread = ResolveThread(threadId);
-			if (thread.Process.State != DbgProcessState.Paused)
-				throw new InvalidOperationException("thread's process is not paused");
-			var frames = thread.GetFrames(frameIndex + 1);
-			if (frameIndex >= frames.Length)
-				throw new InvalidOperationException($"frame index {frameIndex} out of range ({frames.Length} frames)");
-			var language = languageService.Value.GetCurrentLanguage(thread.Runtime.RuntimeKindGuid);
-			return (frames[frameIndex], language);
 		}
 	}
 }

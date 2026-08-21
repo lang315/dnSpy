@@ -43,8 +43,12 @@ namespace dnSpy.MCP.Tools {
 
 		// dnlib populates its metadata tables lazily on first access, which is not safe to do from two
 		// threads at once. Static-tool calls are not latency-critical and come from one agent, so
-		// serialising them is a cheap way to stay correct.
+		// serialising them is a cheap way to stay correct. decrypt_strings scans the same modules, so it
+		// takes this same lock (exposed as MetadataLock) rather than racing on a second one.
 		static readonly object metadataLock = new();
+
+		/// <summary>The lock guarding lazy dnlib metadata access, shared with decrypt_strings.</summary>
+		internal static object MetadataLock => metadataLock;
 
 		readonly Lazy<IDsDocumentService> documentService;
 		readonly Lazy<IDecompilerService> decompilerService;
@@ -528,8 +532,9 @@ namespace dnSpy.MCP.Tools {
 		}
 
 		// Resolve the target method(s) a find_* tool operates on: a metadata token (takes precedence) or a
-		// fully-qualified name (every overload). Shared by find_references and find_implementations.
-		static MethodDef[] ResolveTargets(ModuleDef mod, string? method, string? token) {
+		// fully-qualified name (every overload). Shared by find_references, find_implementations and — via
+		// its internal visibility — decrypt_strings.
+		internal static MethodDef[] ResolveTargets(ModuleDef mod, string? method, string? token) {
 			if (token is not null)
 				return new[] { ResolveToken(mod, token) as MethodDef
 					?? throw new InvalidOperationException("token does not resolve to a method") };
