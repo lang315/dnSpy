@@ -204,6 +204,7 @@ Kết quả trả về là JSON dạng text. Lỗi trả về dưới dạng MCP
 | `dbg_set_next_statement` | `il_offset` (bắt buộc), `thread_id` | Dời con trỏ thực thi tới IL offset khác trong cùng method. |
 | `dbg_read_memory` | `address`, `size` (bắt buộc), `pid` | Đọc byte thô từ memory tiến trình, trả về hex (tối đa 65536 byte). |
 | `dbg_write_memory` | `address`, `bytes` (bắt buộc), `pid` | Ghi byte thô (hex) vào memory tiến trình. |
+| `decrypt_strings` | `module`, `method`\|`token` (decryptor, bắt buộc), `max_calls`, `dry_run` | Khôi phục chuỗi bị mã hoá: tìm call-site của hàm decrypt, đọc hằng số đối số, rồi (khi process đang paused) func-eval hàm decrypt để lấy plaintext. `dry_run` chỉ liệt kê call-site + đối số, không cần session. |
 
 Tool chỉ đọc mang annotation `readOnlyHint`; tool thay đổi tiến trình (`dbg_start`, `dbg_write_memory`, `dbg_set_variable`, …) mang `destructiveHint` để client cảnh báo.
 

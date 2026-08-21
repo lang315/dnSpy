@@ -165,6 +165,44 @@ namespace DbgTest {
 			return r.ReadToEnd();
 		}
 
+		// --- String-obfuscation fixture for the decrypt_strings tool ---
+		// Dec is a deliberately trivial, deterministic string "decryptor": each id selects a blob that
+		// is the UTF-8 plaintext XORed byte-for-byte with DecKey. The plaintext ("secret-one",
+		// "secret-two") therefore never appears as a literal in the assembly — the only way to recover
+		// it is to run Dec, which is exactly what decrypt_strings does by func-eval. The static scan sees
+		// only the constant ids at the call sites (Program.UseSecrets); the plaintext comes from the run.
+		const byte DecKey = 0x5A;
+
+		// XOR(plaintext, 0x5A), stored as literals so nothing here reveals the plaintext statically.
+		static readonly byte[][] EncTable = {
+			/* id 0: unused */ Array.Empty<byte>(),
+			/* id 1 */ new byte[] { 0x29, 0x3F, 0x39, 0x28, 0x3F, 0x2E, 0x77, 0x35, 0x34, 0x3F },
+			/* id 2 */ new byte[] { 0x29, 0x3F, 0x39, 0x28, 0x3F, 0x2E, 0x77, 0x2E, 0x2D, 0x35 },
+		};
+
+		/// <summary>
+		/// Static string decryptor — the target of decrypt_strings. Dec(1) == "secret-one",
+		/// Dec(2) == "secret-two". Single-byte XOR, so it is trivially reversible and deterministic.
+		/// </summary>
+		public static string Dec(int id) {
+			var enc = EncTable[id];
+			var buf = new byte[enc.Length];
+			for (int i = 0; i < enc.Length; i++)
+				buf[i] = (byte)(enc[i] ^ DecKey);
+			return System.Text.Encoding.UTF8.GetString(buf);
+		}
+
+		/// <summary>
+		/// Call sites for decrypt_strings: two calls to Dec with distinct constant ids that the static
+		/// scan can read (ldc.i4.1/ldc.i4.2 then call). Reached from Warmup so the methods are emitted
+		/// and a call graph can see them; GC.KeepAlive stops the results being elided.
+		/// </summary>
+		public static void UseSecrets() {
+			var s1 = Dec(1);
+			var s2 = Dec(2);
+			GC.KeepAlive(s1 + s2);
+		}
+
 		/// <summary>
 		/// Exercises the interface implementations, the virtual override, the P/Invoke, the State field and
 		/// the embedded resource so the compiler emits them all; the static tools then read them off disk.
@@ -173,6 +211,7 @@ namespace DbgTest {
 			IGreeter[] greeters = { new EnglishGreeter(), new FrenchGreeter() };
 			Animal animal = new Dog();
 			SetState(7);
+			UseSecrets();
 			GC.KeepAlive(Indicators() + greeters[0].Greet() + greeters[1].Greet() + animal.Speak()
 				+ NativeGetTickCount() + ReadState() + ReadEmbedded());
 		}

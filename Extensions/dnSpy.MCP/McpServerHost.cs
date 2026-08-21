@@ -103,6 +103,9 @@ namespace dnSpy.MCP {
 				// Static analysis: no debug engine, so these are constructed with only the document and
 				// decompiler services and run off the dispatcher.
 				tools.AddRange(new StaticTools(documentService, decompilerService).Create());
+				// decrypt_strings straddles both halves: static call-site discovery (documentService, like
+				// StaticTools) plus func-eval in the paused process (dbg + languageService, like dbg_eval).
+				tools.AddRange(new DecryptTools(dbg, documentService, languageService).Create());
 				// Counts the live list rather than a snapshot, so the reported total covers every tool
 				// including this one — the count is not knowable while the list is still being built.
 				tools.AddRange(new InfoTools(port, () => auth.Token is not null,

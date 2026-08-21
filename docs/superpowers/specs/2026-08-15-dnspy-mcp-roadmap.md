@@ -7,7 +7,7 @@ Ngày: 2026-08-15
 
 Extension đã **sẵn sàng release**. Vài dòng cũ bên dưới nay đã lỗi thời; trạng thái cuối:
 
-- **45 tool** — `dnspy_info`; **phân tích tĩnh** (`decompile` C#/IL, `list_types`, `list_methods`, `search`, `find_references` method/field/type, `find_implementations`, `type_hierarchy`, `call_graph`, `extract_iocs`, `list_resources`/`extract_resource`); `dbg_run_to`; và điều khiển phiên/breakpoint/step/inspect
+- **46 tool** — `dnspy_info`; **phân tích tĩnh** (`decompile` C#/IL, `list_types`, `list_methods`, `search`, `find_references` method/field/type, `find_implementations`, `type_hierarchy`, `call_graph`, `extract_iocs`, `list_resources`/`extract_resource`); `decrypt_strings` (giải mã chuỗi động); `dbg_run_to`; và điều khiển phiên/breakpoint/step/inspect
   (đọc & khám phá assembly không cần debug session). Xác thực **bật mặc định** (token sinh tự động,
   lưu cạnh file settings). (Live/packed `dump_module`/`mem_load` đã hiện thực nhưng **hoãn** sau e2e — xem spec round 4.)
 - **Đã có test project trong repo** (bác bỏ mục 19): Tier 1 (105 test, chạy CI qua `mcp-tests.yml`),
