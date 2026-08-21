@@ -40,6 +40,9 @@ namespace dnSpy.MCP.Tools {
 		const int MaxListItems = 5000;
 		const int DecompileTimeoutMs = 60_000;
 		const int MaxCallGraphDepth = 20;
+		// decompile_batch writes the true count of files but only lists this many in the JSON response, so a
+		// 5000-type export does not return a 5000-entry array. count is always the real number written.
+		const int MaxWrittenList = 500;
 
 		// dnlib populates its metadata tables lazily on first access, which is not safe to do from two
 		// threads at once. Static-tool calls are not latency-critical and come from one agent, so
@@ -68,6 +71,25 @@ namespace dnSpy.MCP.Tools {
 					("token", Schema.Str("Metadata token of a method or type, hex (0x06000001) or decimal"), false),
 					("format", Schema.Str("'csharp' (default) or 'il' — IL shows exact opcodes and offsets, useful for obfuscated code"), false)),
 				Decompile, readOnly: true);
+
+			yield return new ToolDef("decompile_batch",
+				"Decompile many types at once to a folder of files — one file per type, reusing the same whole-type decompilation as the 'decompile' tool. Select the types with exactly one of: 'type' (exact full name), 'namespace' (prefix, nested types included) or 'filter' (wildcards * and ?, matched against the full name, like list_types). Writes '<TypeFullName>.cs' (or '.il') into out_dir. Good for exporting or diffing a whole namespace. No debug session required.",
+				Schema.Object(
+					("module", Schema.Str("Module file path, or file name if already open in dnSpy"), true),
+					("type", Schema.Str("Exact fully-qualified type name to decompile (selects that one type)"), false),
+					("namespace", Schema.Str("Namespace prefix; selects every type whose (outer) namespace equals it or starts with it + '.', nested types included"), false),
+					("filter", Schema.Str("Name pattern, case-insensitive, wildcards * and ? (matched against the full name)"), false),
+					("out_dir", Schema.Str("Output directory, created if needed (default: a fresh temp directory)"), false),
+					("format", Schema.Str("'cs' (default, C#) or 'il'"), false),
+					("max", Schema.Int("Maximum types to write (default 500, clamped 1-5000); truncated=true if more matched"), false)),
+				DecompileBatch,
+				outputSchema: Schema.Object(
+					("module", Schema.Str("The module's name"), false),
+					("outDir", Schema.Str("The directory the files were written to"), false),
+					("format", Schema.Str("'cs' or 'il'"), false),
+					("count", Schema.Int("Number of types decompiled and written"), false),
+					("truncated", Schema.Bool("True if more types matched than 'max'"), false),
+					("written", Schema.Arr("Written files, each with type full name, token and file path"), true)));
 
 			yield return new ToolDef("list_types",
 				"List the types in a module, optionally filtered by a name pattern (wildcards * and ?). Returns each type's full name, metadata token and kind. Use it to discover what an assembly contains.",
@@ -234,6 +256,130 @@ namespace dnSpy.MCP.Tools {
 				throw new InvalidOperationException("this module has no metadata token table");
 			return md.ResolveToken(raw) as IMemberDef
 				?? throw new InvalidOperationException($"no member with token 0x{raw:X8}");
+		}
+
+		// Bulk sibling of decompile: pick a set of types (by exact name, namespace, or wildcard) and write each
+		// one's whole-type decompilation to its own file. The selection is the only new logic — the actual
+		// decompilation reuses decompile's DecompileOne type-path, and each file is the full (untruncated)
+		// source, since writing to disk is exactly what lets a caller keep more than fits in one response.
+		string DecompileBatch(JObject args) {
+			var module = ReqStr(args, "module");
+			var type = (string?)args["type"];
+			var ns = (string?)args["namespace"];
+			var filter = (string?)args["filter"];
+			var outDirArg = (string?)args["out_dir"];
+			var format = ((string?)args["format"] ?? "cs").Trim().ToLowerInvariant();
+			var max = Clamp((int?)args["max"] ?? 500, 1, MaxListItems);
+
+			var selectors = new[] { type, ns, filter }.Count(s => !string.IsNullOrEmpty(s));
+			if (selectors != 1)
+				throw new ArgumentException("provide exactly one of 'type', 'namespace' or 'filter'");
+
+			string ext;
+			if (format is "cs" or "csharp")
+				ext = "cs";
+			else if (format == "il")
+				ext = "il";
+			else
+				throw new ArgumentException("'format' must be 'cs' or 'il'");
+
+			lock (metadataLock) {
+				var mod = MetadataResolver.ResolveModule(documentService.Value, module);
+				var decompiler = DecompilerFor(ext == "il" ? "il" : "csharp");
+
+				// A fresh, unique temp dir by default so concurrent or repeated calls never clobber each other.
+				var outDir = string.IsNullOrEmpty(outDirArg)
+					? System.IO.Path.Combine(System.IO.Path.GetTempPath(), "dnspymcp-decompile-" + Guid.NewGuid().ToString("N").Substring(0, 8))
+					: outDirArg!;
+				System.IO.Directory.CreateDirectory(outDir);
+
+				var written = new JArray();
+				var count = 0;
+				var truncated = false;
+				foreach (var t in SelectBatchTypes(mod, type, ns, filter)) {
+					if (count >= max) {
+						// At least one more type matched than we agreed to write: report the cap, don't write it.
+						truncated = true;
+						break;
+					}
+					using var cts = new CancellationTokenSource(DecompileTimeoutMs);
+					var ctx = new DecompilationContext { CancellationToken = cts.Token };
+					var source = DecompileOne(decompiler, t, ctx);
+					var file = System.IO.Path.Combine(outDir, SafeFileName(t.FullName) + "." + ext);
+					System.IO.File.WriteAllText(file, source);
+					count++;
+					if (written.Count < MaxWrittenList) {
+						written.Add(new JObject {
+							["type"] = t.FullName,
+							["token"] = Token(t.MDToken),
+							["file"] = file,
+						});
+					}
+				}
+
+				return Json(new JObject {
+					["module"] = mod.Name?.String,
+					["outDir"] = outDir,
+					["format"] = ext,
+					["count"] = count,
+					["truncated"] = truncated,
+					["written"] = written,
+				});
+			}
+		}
+
+		// The types decompile_batch will write, in metadata order. Exactly one selector is set (validated by the
+		// caller). An explicit 'type' match is exact and keeps compiler-generated names; a 'namespace' or 'filter'
+		// sweep skips <Module> and compiler-generated <...> types, which are noise in a bulk export.
+		static IEnumerable<TypeDef> SelectBatchTypes(ModuleDef mod, string? type, string? ns, string? filter) {
+			if (!string.IsNullOrEmpty(type)) {
+				foreach (var t in mod.GetTypes())
+					if (t.FullName == type)
+						yield return t;
+				yield break;
+			}
+			if (!string.IsNullOrEmpty(ns)) {
+				foreach (var t in mod.GetTypes()) {
+					if (IsCompilerGenerated(t))
+						continue;
+					var tns = EffectiveNamespace(t);
+					if (tns == ns || tns.StartsWith(ns + ".", StringComparison.Ordinal))
+						yield return t;
+				}
+				yield break;
+			}
+			var rx = Wildcard(filter!);
+			foreach (var t in mod.GetTypes()) {
+				if (IsCompilerGenerated(t))
+					continue;
+				if (rx.IsMatch(t.FullName))
+					yield return t;
+			}
+		}
+
+		// A nested type's own Namespace is empty; its namespace for selection is the outermost enclosing type's,
+		// so a 'namespace' sweep pulls nested types in with their parent.
+		static string EffectiveNamespace(TypeDef t) {
+			var top = t;
+			while (top.DeclaringType is TypeDef dt)
+				top = dt;
+			return top.Namespace?.String ?? string.Empty;
+		}
+
+		// <Module> and compiler-emitted types (<PrivateImplementationDetails>, <>c display classes, iterator
+		// state machines, …) all have simple names starting with '<'.
+		static bool IsCompilerGenerated(TypeDef t) {
+			var name = t.Name?.String;
+			return name is not null && name.StartsWith("<", StringComparison.Ordinal);
+		}
+
+		// A type full name turned into one readable file name: invalid path characters (the '/' in a nested
+		// name, generic-arity punctuation, …) become '_' so 'NS.Outer/Inner' writes as 'NS.Outer_Inner'.
+		static string SafeFileName(string fullName) {
+			var name = string.IsNullOrEmpty(fullName) ? "type" : fullName;
+			foreach (var c in System.IO.Path.GetInvalidFileNameChars())
+				name = name.Replace(c, '_');
+			return name;
 		}
 
 		string ListTypes(JObject args) {
