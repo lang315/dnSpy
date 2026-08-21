@@ -38,9 +38,9 @@
     <EmbeddedResource Remove="HeapHelper\**\*" />
   </ItemGroup>
 
-  <!-- The Deob host + its de4dotEx submodule are likewise nested-but-independent (net10.0 console driving
-       the de4dot engine on net8.0). NOT compiled into this extension — exclude every source under Deob\
-       (the host AND the whole de4dotEx submodule) from the SDK's default globs. -->
+  <!-- The Deob host + the vendored de4dotEx source are likewise nested-but-independent (net10.0 console
+       driving the de4dot engine on net8.0). NOT compiled into this extension — exclude every source under
+       Deob\ (the host AND the whole vendored de4dotEx tree) from the SDK's default globs. -->
   <ItemGroup>
     <Compile Remove="Deob\**\*.cs" />
     <None Remove="Deob\**\*" />
@@ -72,13 +72,13 @@
       Publish the de4dot Deob host next to this extension's output so the `deobfuscate` tool can locate
       and spawn it from <extension bin>/Deob/dnSpy.MCP.DeobHost.exe. de4dot is a pure managed file
       transform (no bitness matching), so a single framework-dependent win-x64 apphost serves every
-      debuggee, matching dnSpy's own net10.0-windows runtime. The host builds the de4dotEx submodule
+      debuggee, matching dnSpy's own net10.0-windows runtime. The host builds the vendored de4dotEx source
       (net8.0) transitively; those engine DLLs land in the same folder. Incremental via Inputs/Outputs.
       Only shells out to `dotnet publish` for the host — it never touches dnSpy's own build graph.
 
-      Requires the de4dotEx submodule to be initialised (see the recursive submodule fetch in the build
-      docs). If it is missing, the publish is skipped with a warning rather than failing the extension
-      build, so a contributor who has not fetched the submodule still gets a working dnSpy without this tool.
+      de4dotEx is vendored in-tree under Deob\de4dotEx (no submodule to fetch). The Exists gate below is a
+      harmless safety net: if that tree is ever deleted, the publish is skipped with a warning rather than
+      failing the extension build, so dnSpy still builds — just without this one tool.
   -->
   <Target Name="PublishDeobHost" AfterTargets="Build"
           Condition="Exists('$(MSBuildProjectDirectory)\Deob\de4dotEx\de4dot.cui\de4dot.cui.csproj')"
@@ -89,18 +89,18 @@
       <_DeobHostOut>$([System.IO.Path]::GetFullPath('$(MSBuildProjectDirectory)\$(OutDir)Deob'))</_DeobHostOut>
     </PropertyGroup>
     <Message Importance="high" Text="dnSpy.MCP: publishing de4dot Deob host (win-x64) -> $(_DeobHostOut)" />
-    <!-- ContinueOnError: de4dot is a large third-party submodule; if it ever fails to build, that must
-         NOT break dnSpy's own build/CI. A failed publish just means the deobfuscate tool's host is absent,
-         which the tool reports cleanly at runtime (LocateHost). The follow-up Warning makes it visible. -->
+    <!-- ContinueOnError: de4dot is a large third-party (vendored) codebase; if it ever fails to build, that
+         must NOT break dnSpy's own build/CI. A failed publish just means the deobfuscate tool's host is
+         absent, which the tool reports cleanly at runtime (LocateHost). The follow-up Warning makes it visible. -->
     <Exec Command="dotnet publish &quot;$(_DeobHostProj)&quot; -c $(Configuration) -r win-x64 --self-contained false -o &quot;$(_DeobHostOut)&quot; --nologo -v quiet"
           ContinueOnError="true" />
     <Warning Condition="!Exists('$(OutDir)Deob\dnSpy.MCP.DeobHost.exe')"
-             Text="dnSpy.MCP: the de4dot Deob host failed to publish — the 'deobfuscate' tool will be unavailable at runtime, but dnSpy is otherwise unaffected. Check the de4dotEx submodule build above." />
+             Text="dnSpy.MCP: the de4dot Deob host failed to publish — the 'deobfuscate' tool will be unavailable at runtime, but dnSpy is otherwise unaffected. Check the de4dotEx build above." />
   </Target>
 
-  <Target Name="WarnMissingDe4dotSubmodule" AfterTargets="Build"
+  <Target Name="WarnMissingDe4dot" AfterTargets="Build"
           Condition="!Exists('$(MSBuildProjectDirectory)\Deob\de4dotEx\de4dot.cui\de4dot.cui.csproj')">
-    <Warning Text="dnSpy.MCP: the de4dotEx submodule is not initialised (Deob\de4dotEx is empty) — the 'deobfuscate' tool's host was NOT published. Run: git submodule update --init --recursive" />
+    <Warning Text="dnSpy.MCP: the vendored de4dotEx source (Deob\de4dotEx) is missing — the 'deobfuscate' tool's host was NOT published. It is committed in-tree; restore it from git if it was deleted." />
   </Target>
 
 </Project>
