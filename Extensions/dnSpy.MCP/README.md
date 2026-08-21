@@ -116,6 +116,8 @@ Inspection (require a paused process):
 
 Read-only tools carry a `readOnlyHint` annotation; process-changing tools (`dbg_start`, `dbg_write_memory`, `dbg_set_variable`, …) carry `destructiveHint`.
 
+Selected read tools (`list_types`, `list_methods`, `find_references`, `call_graph`, `dbg_callstack`) also return MCP **`structuredContent`** with a declared **`outputSchema`** (spec 2025-06-18) alongside the text — clients that understand it can consume the JSON directly; the text `content` is unchanged for those that don't.
+
 ## Live notifications (SSE)
 
 Clients may open a `GET /mcp` stream with `Accept: text/event-stream`. The server pushes a

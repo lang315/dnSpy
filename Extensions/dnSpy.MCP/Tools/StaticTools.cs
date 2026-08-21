@@ -71,14 +71,22 @@ namespace dnSpy.MCP.Tools {
 					("module", Schema.Str("Module file path, or file name if already open in dnSpy"), true),
 					("filter", Schema.Str("Name pattern, case-insensitive, wildcards * and ? (matched against the full name)"), false),
 					("max", Schema.Int("Maximum types to return (default 500)"), false)),
-				ListTypes, readOnly: true);
+				ListTypes, readOnly: true,
+				outputSchema: Schema.Object(
+					("module", Schema.Str("The module's name"), false),
+					("matched", Schema.Int("Total number of types matching the filter"), false),
+					("returned", Schema.Int("Number of types included in this response"), false),
+					("types", Schema.Arr("Matched types, each with name, token, kind and method count"), true)));
 
 			yield return new ToolDef("list_methods",
 				"List the methods of a type with their metadata tokens and signatures. Feed the tokens to bp_add or decompile.",
 				Schema.Object(
 					("module", Schema.Str("Module file path, or file name if already open in dnSpy"), true),
 					("type", Schema.Str("Fully-qualified type, e.g. 'MyApp.Program'"), true)),
-				ListMethods, readOnly: true);
+				ListMethods, readOnly: true,
+				outputSchema: Schema.Object(
+					("type", Schema.Str("The type's full name"), false),
+					("methods", Schema.Arr("The type's methods, each with name, token, static and signature"), true)));
 
 			yield return new ToolDef("search",
 				"Search a module for member names (wildcards * and ?) and/or string literals used in method bodies. Great as the first step on an unknown assembly — find where a URL, error message or key appears, or which members match a pattern.",
@@ -100,7 +108,14 @@ namespace dnSpy.MCP.Tools {
 					("access", Schema.Str("For a field target: reads | writes | all (default all)"), false),
 					("scope", Schema.Str("'module' (default, the target's module) or 'open' (every assembly open in dnSpy)"), false),
 					("max", Schema.Int("Maximum results to return (default 200)"), false)),
-				FindReferences, readOnly: true);
+				FindReferences, readOnly: true,
+				outputSchema: Schema.Object(
+					("target", Schema.Str("The resolved target member(s)"), false),
+					("targetKind", Schema.Str("'field' or 'type' (omitted for a method target)"), false),
+					("scope", Schema.Str("'module' or 'open'"), false),
+					("scannedMethods", Schema.Int("How many methods were scanned"), false),
+					("callers", Schema.Arr("Calling methods (present for a method target)"), false),
+					("references", Schema.Arr("Referencing methods (present for a field or type target)"), false)));
 
 			yield return new ToolDef("find_implementations",
 				"Find the methods that override or implement a given virtual, abstract or interface method — the forward direction of the type hierarchy, complementing find_references. Identify the target by fully-qualified name (all overloads) or metadata token.",
@@ -121,7 +136,15 @@ namespace dnSpy.MCP.Tools {
 					("direction", Schema.Str("callers | callees | both (default callers)"), false),
 					("depth", Schema.Int("How many hops to traverse (default 2; 1 = direct callers/callees only)"), false),
 					("max_nodes", Schema.Int("Cap on total nodes; sets truncated=true if exceeded (default 200)"), false)),
-				CallGraph, readOnly: true);
+				CallGraph, readOnly: true,
+				outputSchema: Schema.Object(
+					("root", Schema.Str("The root method (dotted name)"), false),
+					("rootToken", Schema.Str("The root method's metadata token"), false),
+					("direction", Schema.Str("'callers', 'callees' or 'both'"), false),
+					("depth", Schema.Int("How many hops were traversed"), false),
+					("edges", Schema.Arr("Caller->callee edges (from, fromToken, to, toToken)"), true),
+					("nodes", Schema.Arr("Methods in the graph (name, token)"), true),
+					("truncated", Schema.Bool("True if the node cap was hit"), false)));
 
 			yield return new ToolDef("type_hierarchy",
 				"Show a type's base types (up to System.Object) and the interfaces it implements, and/or its derived types (subclasses and interface implementers) within the module or every open assembly.",

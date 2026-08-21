@@ -68,6 +68,16 @@ namespace dnSpy.MCP.Tests {
 				Schema.Object(),
 				_ => "plain"),
 
+			// Opts in to structured content (MCP 2025-06-18): declares an outputSchema and returns a
+			// JSON object, so the server should echo that object back as structuredContent too.
+			new ToolDef("stub_structured", "Read-only stub that also returns structuredContent.",
+				Schema.Object(("text", Schema.Str("Anything"), false)),
+				args => new JObject { ["echo"] = (string?)args["text"] ?? "", ["ok"] = true }.ToString(Newtonsoft.Json.Formatting.None),
+				readOnly: true,
+				outputSchema: Schema.Object(
+					("echo", Schema.Str("The echoed text"), true),
+					("ok", Schema.Bool("Always true"), true))),
+
 			new ToolDef("stub_throw", "Stub that always throws.",
 				Schema.Object(),
 				_ => throw new InvalidOperationException("stub failure message")),

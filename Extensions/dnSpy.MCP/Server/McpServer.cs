@@ -320,6 +320,8 @@ namespace dnSpy.MCP.Server {
 					["description"] = t.Description,
 					["inputSchema"] = t.InputSchema,
 				};
+				if (t.OutputSchema is not null)
+					tool["outputSchema"] = t.OutputSchema;
 				var annotations = Annotations(t);
 				if (annotations is not null)
 					tool["annotations"] = annotations;
@@ -344,7 +346,18 @@ namespace dnSpy.MCP.Server {
 			var args = @params["arguments"] as JObject ?? new JObject();
 			try {
 				var text = tool.Handler(args);
-				return JsonRpc.Result(id, ToolContent(text, isError: false));
+				// Structured content (MCP 2025-06-18): a tool that declares an outputSchema also gets its
+				// JSON echoed back as structuredContent. Parsing is best-effort — a tool that returns raw
+				// (non-JSON) text must never throw here, so a failed parse just leaves structured null.
+				JObject? structured = null;
+				if (tool.OutputSchema is not null) {
+					try {
+						if (JToken.Parse(text) is JObject o)
+							structured = o;
+					}
+					catch { }
+				}
+				return JsonRpc.Result(id, ToolContent(text, isError: false, structured));
 			}
 			catch (Exception ex) {
 				return JsonRpc.Result(id, ToolContent(ex.Message, isError: true));
@@ -418,12 +431,17 @@ namespace dnSpy.MCP.Server {
 			return true;
 		}
 
-		static JObject ToolContent(string text, bool isError) => new JObject {
-			["content"] = new JArray {
-				new JObject { ["type"] = "text", ["text"] = text },
-			},
-			["isError"] = isError,
-		};
+		static JObject ToolContent(string text, bool isError, JObject? structured = null) {
+			var obj = new JObject {
+				["content"] = new JArray {
+					new JObject { ["type"] = "text", ["text"] = text },
+				},
+				["isError"] = isError,
+			};
+			if (structured is not null)
+				obj["structuredContent"] = structured;
+			return obj;
+		}
 
 		static void WriteJson(HttpListenerContext ctx, int status, JObject payload) =>
 			WriteText(ctx, status, "application/json", payload.ToString(Formatting.None));

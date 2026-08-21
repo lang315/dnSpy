@@ -95,7 +95,10 @@ namespace dnSpy.MCP.Tools {
 				Schema.Object(
 					("thread_id", Schema.Int("Native thread id; defaults to the current thread"), false),
 					("max_frames", Schema.Int("Maximum frames to return (default 200)"), false)),
-				CallStack, readOnly: true);
+				CallStack, readOnly: true,
+				outputSchema: Schema.Object(
+					("threadId", Schema.Int("The thread's native id"), false),
+					("frames", Schema.Arr("Stack frames, each with index, frame text, module, token and offset"), true)));
 
 			yield return new ToolDef("dbg_locals",
 				"Get the local variables and parameters of a stack frame on the paused thread.",
