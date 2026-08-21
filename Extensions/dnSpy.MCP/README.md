@@ -61,7 +61,7 @@ Or add to your MCP client config:
 Call `dnspy_info` at any time to check which instance you reached, whether authentication is on and
 which settings file it is using.
 
-## Tools (51)
+## Tools (54)
 
 Endpoint:
 - `dnspy_info` — which dnSpy this is, its version and port, whether a token is required and where it
@@ -130,6 +130,13 @@ Live / packed analysis (requires a paused process):
   size), unmaps memory→file layout, and reconstructs a zeroed COR20/.NET data directory (a common anti-dump
   trick). Note: protectors that *virtualize* the metadata — keep the type tables out of the mapped image —
   yield a loadable but sparse dump; use the on-disk file when it parses.
+
+Heap inspection (require a paused process; walked by a bundled out-of-process ClrMD helper, so modern .NET "regions" GC heaps work):
+- `heap_stats` — histogram of live objects by type (count + total bytes), for a size/leak overview
+- `heap_find` — every live instance of a type (address, size, a small field summary)
+- `heap_object` — inspect one object by address (fields, string contents, array elements)
+  (.NET Framework + .NET/CoreCLR; not Mono/Unity. The helper reads the debuggee's heap read-only; it never
+  changes the process.)
 
 Read-only tools carry a `readOnlyHint` annotation; process-changing tools (`dbg_start`, `dbg_write_memory`, `dbg_set_variable`, …) carry `destructiveHint`.
 

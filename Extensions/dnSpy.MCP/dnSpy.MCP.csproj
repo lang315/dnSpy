@@ -25,6 +25,37 @@
 
   <ItemGroup>
     <PackageReference Include="Newtonsoft.Json" Version="$(NewtonsoftJsonVersion)" />
+    <!-- NOTE: the heap tools (heap_stats/find/object) no longer reference ClrMD in-process. dnSpy's
+         bundled ClrMD is 1.1 and cannot walk a .NET 6+ "regions" GC heap. The walk now runs in the
+         out-of-process HeapHelper (below), which references ClrMD 4.x. -->
   </ItemGroup>
+
+  <!-- The HeapHelper is a nested but independent project (its own net10.0 runtime + ClrMD 4.x). It is
+       NOT compiled as part of this extension, so exclude its sources from the SDK's default globs. -->
+  <ItemGroup>
+    <Compile Remove="HeapHelper\**\*.cs" />
+    <None Remove="HeapHelper\**\*" />
+    <EmbeddedResource Remove="HeapHelper\**\*" />
+  </ItemGroup>
+
+  <!--
+      Publish the HeapHelper for BOTH bitnesses next to this extension's output so it can be located
+      and spawned at runtime from <extension bin>/HeapHelper/win-{x64,x86}/dnSpy.MCP.HeapHelper.exe.
+      ClrMD reads the debuggee's DAC in-process, so the helper's bitness must match the debuggee's
+      (== dnSpy's), hence both RIDs. Framework-dependent (small), matching dnSpy's own net10.0-windows
+      build. Incremental via Inputs/Outputs, so repeat builds skip it. Runs on a plain `dotnet build`
+      of this project (what the Tier 2 gate uses) and on the full msbuild solution build alike; it only
+      shells out to `dotnet publish` for the helper and never touches dnSpy's own build graph. -->
+  <Target Name="PublishHeapHelper" AfterTargets="Build"
+          Inputs="$(MSBuildProjectDirectory)\HeapHelper\dnSpy.MCP.HeapHelper.csproj;$(MSBuildProjectDirectory)\HeapHelper\Program.cs"
+          Outputs="$(OutDir)HeapHelper\win-x64\dnSpy.MCP.HeapHelper.exe;$(OutDir)HeapHelper\win-x86\dnSpy.MCP.HeapHelper.exe">
+    <PropertyGroup>
+      <_HeapHelperProj>$(MSBuildProjectDirectory)\HeapHelper\dnSpy.MCP.HeapHelper.csproj</_HeapHelperProj>
+      <_HeapHelperOut>$([System.IO.Path]::GetFullPath('$(MSBuildProjectDirectory)\$(OutDir)HeapHelper'))</_HeapHelperOut>
+    </PropertyGroup>
+    <Message Importance="high" Text="dnSpy.MCP: publishing HeapHelper (win-x64, win-x86) -> $(_HeapHelperOut)" />
+    <Exec Command="dotnet publish &quot;$(_HeapHelperProj)&quot; -c $(Configuration) -r win-x64 --self-contained false -o &quot;$(_HeapHelperOut)\win-x64&quot; --nologo -v quiet" />
+    <Exec Command="dotnet publish &quot;$(_HeapHelperProj)&quot; -c $(Configuration) -r win-x86 --self-contained false -o &quot;$(_HeapHelperOut)\win-x86&quot; --nologo -v quiet" />
+  </Target>
 
 </Project>

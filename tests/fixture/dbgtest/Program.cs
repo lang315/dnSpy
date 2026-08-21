@@ -14,6 +14,15 @@ namespace DbgTest {
 		public static int State;
 		public static readonly int[] Numbers = { 10, 20, 30, 40, 50 };
 
+		/// <summary>
+		/// A rooted, deterministic heap scene for the ClrMD heap tools (heap_stats / heap_find /
+		/// heap_object). Populated in <see cref="Warmup"/> with five Widgets whose Id/Name/Data the heap
+		/// tests assert on. Kept alive for the whole run by this static field, so every Widget is present
+		/// on the managed heap at any breakpoint reached after Warmup — and the process is paused there,
+		/// so their addresses stay stable while a test walks the heap.
+		/// </summary>
+		public static readonly List<Widget> Widgets = new List<Widget>();
+
 		/// <summary>Writable target for the memory-write round trip.</summary>
 		public static readonly byte[] Scratch = new byte[16];
 
@@ -221,6 +230,12 @@ namespace DbgTest {
 		/// the embedded resource so the compiler emits them all; the static tools then read them off disk.
 		/// </summary>
 		static void Warmup() {
+			// Build the rooted heap scene the ClrMD heap tools inspect. Done before the main loop so all
+			// five Widgets — Id 0..4, Name "widget-{Id}", Data {Id, Id*2} — are alive at every breakpoint
+			// the heap tests reach.
+			for (int id = 0; id < 5; id++)
+				Widgets.Add(new Widget { Id = id, Name = $"widget-{id}", Data = new[] { id, id * 2 } });
+
 			IGreeter[] greeters = { new EnglishGreeter(), new FrenchGreeter() };
 			Animal animal = new Dog();
 			SetState(7);
@@ -236,6 +251,18 @@ namespace DbgTest {
 		public static class Inner {
 			public static string Ping() => "pong";
 		}
+	}
+
+	/// <summary>
+	/// A small, rooted heap object for the ClrMD heap tools: a scalar field (Id), a string field (Name)
+	/// and a reference/array field (Data). <see cref="Program.Widgets"/> keeps five of these alive with
+	/// known values, so heap_stats sees the type, heap_find lists the instances and heap_object reads one.
+	/// Name and Data are given defaults only to satisfy nullable analysis; every instance overwrites them.
+	/// </summary>
+	public sealed class Widget {
+		public int Id;
+		public string Name = "";
+		public int[] Data = Array.Empty<int>();
 	}
 
 	/// <summary>An object graph for the expand tool to walk into.</summary>

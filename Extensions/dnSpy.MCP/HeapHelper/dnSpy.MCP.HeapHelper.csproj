@@ -1,0 +1,44 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+      Out-of-process ClrMD 4.x heap walker for the dnSpy.MCP heap tools. It is deliberately NOT part of
+      dnSpy.sln and does NOT import ../../DnSpyCommon.props: it needs its own runtime (net10.0), its own
+      ClrMD (4.x, incompatible with the 1.1 the dnSpy engine is built against), and none of dnSpy's TFM
+      matrix or IL-rewriting. The extension publishes it per-RID into <extension bin>/HeapHelper/win-*/
+      via an AfterTargets step in ../dnSpy.MCP.csproj and spawns the matching-bitness build at runtime.
+
+      Framework-dependent on purpose (SelfContained=false): dnSpy's own net10.0-windows build is
+      framework-dependent, so the matching net10.0 runtime is already present, and this keeps the
+      published helper to an apphost + ClrMD + a few managed DLLs instead of a ~70 MB self-contained copy.
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <AssemblyName>dnSpy.MCP.HeapHelper</AssemblyName>
+    <RootNamespace>dnSpy.MCP.HeapHelper</RootNamespace>
+    <!-- annotations (not full 'enable'): permit the nullable '?' markers used in Program.cs without
+         turning on flow-analysis warnings — keeps the file self-documenting yet warning-free. -->
+    <Nullable>annotations</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+
+    <!-- Both bitnesses: ClrMD loads the debuggee's DAC in-process, so the helper's bitness must match. -->
+    <RuntimeIdentifiers>win-x64;win-x86</RuntimeIdentifiers>
+    <SelfContained>false</SelfContained>
+
+    <!-- Keep the published folder lean and clean. -->
+    <DebugType>none</DebugType>
+    <DebugSymbols>false</DebugSymbols>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <Deterministic>true</Deterministic>
+    <!-- This helper is not shipped as a NuGet package. -->
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Diagnostics.Runtime" Version="4.0.732401" />
+  </ItemGroup>
+
+</Project>

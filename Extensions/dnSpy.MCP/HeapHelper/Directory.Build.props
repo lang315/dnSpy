@@ -1,0 +1,6 @@
+<!-- Intentionally empty: isolates the HeapHelper from the repo-root Directory.Build.props/.targets.
+     MSBuild walks up and imports the nearest Directory.Build.* only, so placing empty ones here stops
+     the walk. The helper is a standalone net10.0 console with its own ClrMD 4.x; it must not inherit
+     dnSpy's TFM matrix, IL-rewriting, or the "garbage file" post-build cleanup meant for dnSpy's output. -->
+<Project>
+</Project>
