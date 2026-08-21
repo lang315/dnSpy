@@ -61,7 +61,7 @@ Or add to your MCP client config:
 Call `dnspy_info` at any time to check which instance you reached, whether authentication is on and
 which settings file it is using.
 
-## Tools (54)
+## Tools (55)
 
 Endpoint:
 - `dnspy_info` — which dnSpy this is, its version and port, whether a token is required and where it
@@ -130,6 +130,10 @@ Live / packed analysis (requires a paused process):
   size), unmaps memory→file layout, and reconstructs a zeroed COR20/.NET data directory (a common anti-dump
   trick). Note: protectors that *virtualize* the metadata — keep the type tables out of the mapped image —
   yield a loadable but sparse dump; use the on-disk file when it parses.
+- `deobfuscate` — run de4dot on a module and write a **cleaned copy** to disk (control-flow deobfuscation +
+  **static** string decryption; symbol renaming stays **off** and no target code is run), then analyse the
+  copy with the static tools. A static analysis artifact: it never touches the live process, and unknown or
+  metadata-virtualizing protectors (e.g. NETGuard) are passed through unchanged. No debug session needed.
 
 Heap inspection (require a paused process; walked by a bundled out-of-process ClrMD helper, so modern .NET "regions" GC heaps work):
 - `heap_stats` — histogram of live objects by type (count + total bytes), for a size/leak overview

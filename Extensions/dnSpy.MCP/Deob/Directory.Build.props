@@ -1,0 +1,8 @@
+<!-- Intentionally empty: isolates the Deob host AND the de4dotEx submodule from the repo-root
+     Directory.Build.props/.targets. MSBuild walks up and imports the nearest Directory.Build.* only,
+     so placing empty ones here stops the walk. The de4dot host is a standalone net10.0 console that
+     builds the de4dotEx engine projects (their own net8.0 TFM, de4dot.snk, dnlib 4.5); it must not
+     inherit dnSpy's TFM matrix, IL-rewriting, or the "garbage file" post-build cleanup.
+     de4dotEx has no Directory.Build.props of its own, so this wall protects the submodule too. -->
+<Project>
+</Project>

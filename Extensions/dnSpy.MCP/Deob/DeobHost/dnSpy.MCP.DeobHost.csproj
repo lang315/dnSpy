@@ -1,0 +1,50 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+      Out-of-process de4dot host for the dnSpy.MCP `deobfuscate` tool. Like the HeapHelper, it is
+      deliberately NOT part of dnSpy.sln and does NOT import ../../../DnSpyCommon.props: it drives the
+      de4dotEx engine (a git submodule at ../de4dotEx), which has its own TFM (net8.0), signing key and
+      dnlib 4.5. dnSpy's type identity must never touch de4dot's dnlib, so all de4dot work happens here,
+      in a separate process, file-in/file-out. The extension publishes this host into
+      <extension bin>/Deob/ via an AfterTargets step in ../../dnSpy.MCP.csproj and spawns it per call.
+
+      Runtime: net10.0, framework-dependent (SelfContained=false) — matches dnSpy's own net10.0-windows
+      build so the runtime is already present, and keeps the published host to an apphost + the de4dot
+      engine DLLs. de4dot is a pure managed byte-in/byte-out transform, so unlike the HeapHelper it needs
+      no bitness matching: one win-x64 apphost serves every debuggee. The net10 host references the
+      net8.0 de4dot.cui project via normal TFM negotiation (net8.0 libraries load on net10.0).
+
+      LOCKED DOWN: this host only ever asks de4dot for rename-off, control-flow-on, static/none string
+      decryption. It never sets an AssemblyClientFactory and never selects delegate/emulate, so de4dot's
+      AssemblyServer (which would load and run the target's code) is never engaged. See Program.cs.
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <AssemblyName>dnSpy.MCP.DeobHost</AssemblyName>
+    <RootNamespace>dnSpy.MCP.DeobHost</RootNamespace>
+    <Nullable>annotations</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+
+    <!-- de4dot is bitness-agnostic (managed file transform); one x64 apphost is enough. -->
+    <RuntimeIdentifiers>win-x64</RuntimeIdentifiers>
+    <SelfContained>false</SelfContained>
+
+    <!-- Keep the published folder lean and clean. -->
+    <DebugType>none</DebugType>
+    <DebugSymbols>false</DebugSymbols>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <Deterministic>true</Deterministic>
+    <IsPackable>false</IsPackable>
+    <!-- de4dot.code raises some obsolete/platform warnings; they are not this host's concern. -->
+    <NoWarn>$(NoWarn);CA1416;SYSLIB0011;SYSLIB0051</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\de4dotEx\de4dot.cui\de4dot.cui.csproj" />
+  </ItemGroup>
+
+</Project>

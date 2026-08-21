@@ -213,6 +213,7 @@ Kết quả trả về là JSON dạng text. Lỗi trả về dưới dạng MCP
 | `heap_find` | `type` (bắt buộc), `max` | Mọi instance sống của 1 type (address, size, tóm tắt field). |
 | `heap_object` | `address` (bắt buộc) | Soi 1 object theo address (field, string, phần tử array). Heap walk qua helper ClrMD out-of-process (chạy được heap .NET "regions" hiện đại); .NET Fx + CoreCLR, không Mono. |
 | `dump_module` | `module` (bắt buộc), `save_path` | Dump 1 module đã nạp trong tiến trình ra file .NET trên đĩa, đọc từ bộ nhớ (bắt được dạng đã unpack). Tự tính size thật từ **section table**, unmap memory→file, và **dựng lại COR20 directory bị zero** (anti-dump), rồi phân tích file bằng tool tĩnh. *Hạn chế:* protector virtualize metadata → dump load được nhưng rỗng; dùng file trên đĩa nếu parse được. Cần process paused. |
+| `deobfuscate` | `module` (bắt buộc), `save_path`, `obfuscator`, `string_decrypt` | Chạy de4dot ghi ra **bản copy đã làm sạch** (control-flow deob + giải mã chuỗi **static**; **rename TẮT**, không chạy code target), rồi phân tích copy bằng tool tĩnh. Là artifact phân tích tĩnh — không đụng tiến trình sống; protector lạ/virtualize (NETGuard) để nguyên. Không cần session. |
 
 Tool chỉ đọc mang annotation `readOnlyHint`; tool thay đổi tiến trình (`dbg_start`, `dbg_write_memory`, `dbg_set_variable`, …) mang `destructiveHint` để client cảnh báo.
 
