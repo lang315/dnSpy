@@ -80,7 +80,8 @@ namespace dnSpy.MCP.Tests {
 
 			tools.AddRange(McpTestServer.StubTools());
 
-			Assert.Equal(6, (int?)JObject.Parse(tool.Handler(new JObject()))["server"]!["toolCount"]);
+			// 1 info tool + StubTools() (which now includes stub_structured).
+			Assert.Equal(1 + McpTestServer.StubTools().Count, (int?)JObject.Parse(tool.Handler(new JObject()))["server"]!["toolCount"]);
 		}
 
 		[Fact]

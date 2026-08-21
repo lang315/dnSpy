@@ -143,5 +143,54 @@ namespace dnSpy.MCP.Tests {
 			Assert.Equal(HttpStatusCode.Accepted, res.Status);
 			Assert.Equal("", res.Body);
 		}
+
+		// ---- Structured content (MCP spec 2025-06-18) ----
+		// stub_structured (in StubTools) is the only tool that declares an outputSchema and returns a
+		// JSON object. All four below are red before the change: ToolDef had no OutputSchema, ListTools
+		// never emitted `outputSchema`, and CallTool never emitted `structuredContent`.
+
+		// A tool that opts in advertises its outputSchema (of type "object") in tools/list.
+		[Fact]
+		public void ToolsList_advertises_outputSchema_for_a_structured_tool() {
+			using var srv = new McpTestServer();
+			var res = Rpc.Post(srv.McpUrl, Rpc.Request(2, "tools/list"));
+			var structured = ((JArray)res.Result["tools"]!).Single(t => (string?)t["name"] == "stub_structured");
+
+			Assert.Equal("object", (string?)structured["outputSchema"]!["type"]);
+		}
+
+		// Back-compat: a tool that did not opt in advertises no outputSchema at all.
+		[Fact]
+		public void ToolsList_omits_outputSchema_for_a_tool_that_did_not_opt_in() {
+			using var srv = new McpTestServer();
+			var res = Rpc.Post(srv.McpUrl, Rpc.Request(2, "tools/list"));
+			var plain = ((JArray)res.Result["tools"]!).Single(t => (string?)t["name"] == "stub_read");
+
+			Assert.Null(plain["outputSchema"]);
+		}
+
+		// A structured tool returns BOTH the text content array (unchanged) AND a structuredContent
+		// object that round-trips that same text.
+		[Fact]
+		public void CallTool_on_a_structured_tool_returns_text_and_matching_structuredContent() {
+			using var srv = new McpTestServer();
+			var res = Rpc.Post(srv.McpUrl, Rpc.CallTool(3, "stub_structured", new JObject { ["text"] = "hi" }));
+
+			Assert.False(res.ToolIsError);
+			var fromText = JObject.Parse(res.ToolText); // the legacy text contract still holds
+			Assert.Equal("hi", (string?)fromText["echo"]);
+			var structured = (JObject)res.Result["structuredContent"]!;
+			Assert.True(JToken.DeepEquals(fromText, structured)); // structuredContent == parsed text
+		}
+
+		// Back-compat: a tool without an outputSchema returns text content only, no structuredContent.
+		[Fact]
+		public void CallTool_on_a_plain_tool_returns_no_structuredContent() {
+			using var srv = new McpTestServer();
+			var res = Rpc.Post(srv.McpUrl, Rpc.CallTool(4, "stub_read", new JObject { ["text"] = "hi" }));
+
+			Assert.False(res.ToolIsError);
+			Assert.Null(res.Result["structuredContent"]);
+		}
 	}
 }

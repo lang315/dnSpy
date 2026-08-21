@@ -34,15 +34,19 @@ namespace dnSpy.MCP.Tools {
 		public bool ReadOnly { get; }
 		/// <summary>Tool may change program/debugger state destructively (MCP <c>destructiveHint</c>).</summary>
 		public bool Destructive { get; }
+		/// <summary>Optional JSON-schema for the tool's structured result (MCP <c>outputSchema</c>, spec 2025-06-18).
+		/// When set, the handler's JSON is also returned as <c>structuredContent</c>; null means text-only.</summary>
+		public JObject? OutputSchema { get; }
 
 		public ToolDef(string name, string description, JObject inputSchema, Func<JObject, string> handler,
-			bool readOnly = false, bool destructive = false) {
+			bool readOnly = false, bool destructive = false, JObject? outputSchema = null) {
 			Name = name;
 			Description = description;
 			InputSchema = inputSchema;
 			Handler = handler;
 			ReadOnly = readOnly;
 			Destructive = destructive;
+			OutputSchema = outputSchema;
 		}
 	}
 
@@ -68,5 +72,8 @@ namespace dnSpy.MCP.Tools {
 		public static JObject Str(string description) => new JObject { ["type"] = "string", ["description"] = description };
 		public static JObject Int(string description) => new JObject { ["type"] = "integer", ["description"] = description };
 		public static JObject Bool(string description) => new JObject { ["type"] = "boolean", ["description"] = description };
+		/// <summary>An array of objects — enough JSON-schema for an <c>outputSchema</c> array property.</summary>
+		public static JObject Arr(string description) =>
+			new JObject { ["type"] = "array", ["description"] = description, ["items"] = new JObject { ["type"] = "object" } };
 	}
 }
