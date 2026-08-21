@@ -22,3 +22,6 @@
 	path = Extensions/dnSpy.Debugger/Mono.Debugger.Soft
 	url = https://github.com/dnSpyEx/Mono.Debugger.Soft.git
 	branch = dnSpy
+[submodule "Extensions/dnSpy.MCP/Deob/de4dotEx"]
+	path = Extensions/dnSpy.MCP/Deob/de4dotEx
+	url = https://github.com/GDATAAdvancedAnalytics/de4dotEx.git

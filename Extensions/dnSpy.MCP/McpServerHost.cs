@@ -120,6 +120,10 @@ namespace dnSpy.MCP {
 				// {pid,bitness,paused} snapshot goes through the dispatcher (DbgAccess); the multi-second
 				// heap walk runs on the request thread so it neither blocks the dispatcher nor hits its timeout.
 				tools.AddRange(new HeapTools(dbg).Create());
+				// deobfuscate spawns an out-of-process, locked-down de4dot host (Deob\dnSpy.MCP.DeobHost.exe)
+				// to write a cleaned COPY of an obfuscated assembly to disk; the static tools above then read
+				// it. Pure file-in/file-out — no debugger services, no in-proc de4dot/dnlib.
+				tools.AddRange(new DeobfuscateTools().Create());
 				// Counts the live list rather than a snapshot, so the reported total covers every tool
 				// including this one — the count is not knowable while the list is still being built.
 				tools.AddRange(new InfoTools(port, () => auth.Token is not null,
