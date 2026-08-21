@@ -107,6 +107,11 @@ namespace dnSpy.MCP {
 				// Static analysis: no debug engine, so these are constructed with only the document and
 				// decompiler services and run off the dispatcher.
 				tools.AddRange(new StaticTools(documentService, decompilerService).Create());
+				// dump_module reaches into the *paused* debuggee and copies a module's image out of process
+				// memory to disk, sizing it from the in-memory section table so a packed module is not
+				// truncated — the StaticTools above then analyse the dump. Only DbgAccess is needed: it finds
+				// the module and reads its process memory (all on the DbgManager dispatcher).
+				tools.AddRange(new LiveModuleTools(dbg).Create());
 				// decrypt_strings straddles both halves: static call-site discovery (documentService, like
 				// StaticTools) plus func-eval in the paused process (dbg + languageService, like dbg_eval).
 				tools.AddRange(new DecryptTools(dbg, documentService, languageService).Create());

@@ -92,6 +92,25 @@ Lý do vòng 4 hoãn: tự cuộn PE fixup mong manh; `DbgModule.Size` dao độ
   provenance (RAM≠đĩa), điều fixture cũ không làm được.
 - Chỉ bật lại `dump_module`/`mem_load` khi Tier 2 fixture-packed xanh.
 
+#### KẾT QUẢ Phase 5 (đã ship — chỉ `dump_module`, 48→49; `mem_load` bỏ vì thừa)
+E2e thật trên `653C0125.dll` (NETGuard) lộ ra **3 lớp** phải xử lý, và tool nay xử lý cả 3:
+1. **Size sai** → tính `imageSize` từ **section table** (`max(AlignUp(VA+max(VSize,RawSize),SA))`), không tin
+   `DbgModule.Size`. E2e: imageSize=9224192 = 2× file trên đĩa (4688384). ✓
+2. **Compact làm mất metadata** (section virtual-grown, `VSize>RawSize`) → chuyển sang **UNMAP**: giữ nguyên
+   ảnh RAM đầy đủ + viết lại section table identity-map (`PointerToRawData=VA`, `SizeOfRawData=AlignUp(VSize,SA)`,
+   `FileAlignment=SectionAlignment`) ⇒ file-offset==RVA. ✓
+3. **Anti-dump: COR20 directory bị zero** (NETGuard zero `DataDirectory[14]` → dnlib báo ".NET data directory
+   RVA is 0") → **`ReconstructCor20Directory`**: quét `BSJB` (metadata root) + CLI header (`cb==0x48`,
+   `MetaData.RVA==BSJB`), ghi lại `DataDirectory[14]={cliRva,72}`. E2e: `cor20Reconstructed:true`, **dnlib LOAD
+   được dump** (trước đây "could not load module"). ✓
+- **Hạn chế THẬT (đã ghi trên tool + README):** NETGuard **virtualize metadata** — type tables KHÔNG nằm trong
+  ảnh PE đã map (0 types dù dump ở entry hay sau khi UI init). Dump load được nhưng rỗng; đây là **bản chất
+  protection**, không phải bug dump. 653C0125 phân tích được từ **file đĩa** (161 types). Khôi phục metadata bị
+  virtualize = ngoài phạm vi (thuộc nhóm de4dot/unpack đã hoãn).
+- **Validate:** (a) Tier 2 fixture own-module dump (MZ + `list_types` thấy `DbgTest.Program` + `decompile`);
+  (b) Tier 1 unit test cho `ReconstructCor20Directory` (synthetic PE, COR20 zero → khôi phục); (c) **e2e thật**
+  653C0125 (dump load được trong dnlib). Bỏ "fixture packed `Assembly.Load`" — e2e thật mạnh hơn.
+
 ### Xuyên suốt — Robustness (từ option 3)
 - **Teardown AV** (upstream, Locals-refresh đọc PE đã free dưới churn): không sửa được dnSpy, nhưng (a)
   serial hoá dump/read nặng để tránh refresh đồng thời, (b) try/guard quanh read rủi ro, (c) trình tự reset
