@@ -61,7 +61,7 @@ Or add to your MCP client config:
 Call `dnspy_info` at any time to check which instance you reached, whether authentication is on and
 which settings file it is using.
 
-## Tools (46)
+## Tools (48)
 
 Endpoint:
 - `dnspy_info` — which dnSpy this is, its version and port, whether a token is required and where it
@@ -101,6 +101,9 @@ Breakpoints:
 - `mbp_add` / `mbp_list` / `mbp_remove` — module-load breakpoints (break when a module loads)
 - `exc_break` — break when a CLR exception is thrown (all, or a named type)
 - `dbg_run_to` — resume and pause when execution reaches a method (sets a temporary breakpoint)
+- `bp_add_trace` — a **tracepoint**: log a message (with `{expr}` interpolation) each time a location is hit,
+  then auto-resume without stopping
+- `trace_log` — read the messages collected by tracepoints (`max`, `clear`)
 
 Inspection (require a paused process):
 - `dbg_threads`, `dbg_modules`

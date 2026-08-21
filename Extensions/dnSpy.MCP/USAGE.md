@@ -172,6 +172,8 @@ Kết quả trả về là JSON dạng text. Lỗi trả về dưới dạng MCP
 | `dbg_step` | `kind` = `into`\|`over`\|`out` (bắt buộc), `timeout_ms` | Step luồng đang paused và chờ hoàn thành, trả về frame trên cùng. |
 | `dbg_wait_for_break` | `timeout_ms` | Chặn cho tới khi có tiến trình paused (trúng breakpoint / step xong / break), hoặc timeout. |
 | `dbg_run_to` | `module` (bắt buộc), `method`\|`token`, `il_offset`, `timeout_ms` | Chạy tiếp tới khi tới 1 method rồi dừng ở đó (đặt breakpoint tạm, continue, chờ, gỡ). Cần phiên đang chạy. |
+| `bp_add_trace` | `module`+`token` hoặc `method` (bắt buộc), `message` (bắt buộc), `condition` | **Tracepoint**: mỗi lần trúng thì ghi 1 message (nội suy `{expr}`) rồi **tự chạy tiếp**, không dừng process. |
+| `trace_log` | `max`, `clear` | Đọc các message tracepoint thu được (ring buffer, tối đa 1000). `clear`=true để xoá sau khi đọc. |
 
 ### Breakpoint
 
