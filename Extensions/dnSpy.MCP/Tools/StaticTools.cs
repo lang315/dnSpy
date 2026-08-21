@@ -39,6 +39,7 @@ namespace dnSpy.MCP.Tools {
 		const int MaxDecompileChars = 200_000;
 		const int MaxListItems = 5000;
 		const int DecompileTimeoutMs = 60_000;
+		const int MaxCallGraphDepth = 20;
 
 		// dnlib populates its metadata tables lazily on first access, which is not safe to do from two
 		// threads at once. Static-tool calls are not latency-critical and come from one agent, so
@@ -110,6 +111,17 @@ namespace dnSpy.MCP.Tools {
 					("scope", Schema.Str("'module' (default, the target's module) or 'open' (every assembly open in dnSpy)"), false),
 					("max", Schema.Int("Maximum implementations to return (default 200)"), false)),
 				FindImplementations, readOnly: true);
+
+			yield return new ToolDef("call_graph",
+				"Build a static call graph around a method — its callers, its callees, or both, traversed to a given depth — without running the program. Callers reuse find_references' caller scan; callees are the call/newobj/ldftn targets in the method body resolved to methods in the same module. Identify the root by fully-qualified name or metadata token.",
+				Schema.Object(
+					("module", Schema.Str("Module file path, or file name if already open in dnSpy"), true),
+					("method", Schema.Str("Fully-qualified root method, e.g. 'MyApp.Program.Main'"), false),
+					("token", Schema.Str("Metadata token of the root method, hex (0x06000001) or decimal"), false),
+					("direction", Schema.Str("callers | callees | both (default callers)"), false),
+					("depth", Schema.Int("How many hops to traverse (default 2; 1 = direct callers/callees only)"), false),
+					("max_nodes", Schema.Int("Cap on total nodes; sets truncated=true if exceeded (default 200)"), false)),
+				CallGraph, readOnly: true);
 
 			yield return new ToolDef("type_hierarchy",
 				"Show a type's base types (up to System.Object) and the interfaces it implements, and/or its derived types (subclasses and interface implementers) within the module or every open assembly.",
@@ -524,7 +536,11 @@ namespace dnSpy.MCP.Tools {
 		// A MethodDef's cross-module identity: its token is unique only within a module, so pair it with the
 		// module location. Used both to compare methods (SameDef) and to dedup them (the find_implementations seen set).
 		static string MethodKey(MethodDef m) =>
-			m.MDToken.Raw.ToString("X8") + "@" + (m.Module?.Location?.ToLowerInvariant() ?? "");
+			m.MDToken.Raw.ToString("X8") + "@" + ModuleKey(m.Module);
+
+		// A module's identity — its location, lower-cased — matching MethodKey's module component. Used by
+		// call_graph both to key methods and to test whether a resolved callee is inside the resolution scope.
+		static string ModuleKey(ModuleDef? m) => m?.Location?.ToLowerInvariant() ?? "";
 
 		// A called reference matches the target when it resolves to the same MethodDef — compared by
 		// token and defining module so a MemberRef from another module still lines up (the pattern
@@ -657,6 +673,123 @@ namespace dnSpy.MCP.Tools {
 			t.IsAbstract ? "abstract" :
 			t.IsVirtual ? "virtual" :
 			"non-virtual";
+
+		// A breadth-first call graph around a root method. Nodes are deduped by the same MethodKey identity
+		// find_references uses, edges are always oriented caller -> callee, and the total node count is
+		// capped (truncated=true when the cap bites). Resolution stays within the root's own module, so the
+		// framework methods a body calls (Console.WriteLine, …) are not walked into.
+		string CallGraph(JObject args) {
+			var module = ReqStr(args, "module");
+			var method = (string?)args["method"];
+			var token = (string?)args["token"];
+			var direction = ((string?)args["direction"] ?? "callers").ToLowerInvariant();
+			var depth = Clamp((int?)args["depth"] ?? 2, 1, MaxCallGraphDepth);
+			var maxNodes = Clamp((int?)args["max_nodes"] ?? 200, 1, MaxListItems);
+			var wantCallers = direction is "both" or "callers";
+			var wantCallees = direction is "both" or "callees";
+			if (!wantCallers && !wantCallees)
+				throw new ArgumentException("'direction' must be callers, callees or both");
+
+			lock (metadataLock) {
+				var mod = MetadataResolver.ResolveModule(documentService.Value, module);
+				var targets = ResolveTargets(mod, method, token);
+				var modules = new List<ModuleDef> { mod };
+				var scope = new HashSet<string>(modules.Select(m => ModuleKey(m)));
+
+				// nodeKeys is the dedup set; nodeList keeps insertion order for a stable result.
+				var nodeKeys = new HashSet<string>();
+				var nodeList = new List<MethodDef>();
+				foreach (var t in targets)
+					if (nodeKeys.Add(MethodKey(t)))
+						nodeList.Add(t);
+
+				var edges = new JArray();
+				var edgeSeen = new HashSet<string>();
+				var truncated = false;
+
+				var current = new List<MethodDef>(nodeList);
+				for (int level = 0; level < depth && current.Count > 0; level++) {
+					var next = new List<MethodDef>();
+					foreach (var m in current) {
+						foreach (var (from, to, neighbor) in Neighbors(m, modules, scope, wantCallers, wantCallees)) {
+							var key = MethodKey(neighbor);
+							if (!nodeKeys.Contains(key)) {
+								if (nodeList.Count >= maxNodes) {
+									truncated = true;
+									continue; // dropping the node drops its edge too, so the graph stays consistent
+								}
+								nodeKeys.Add(key);
+								nodeList.Add(neighbor);
+								next.Add(neighbor);
+							}
+							AddEdge(edges, edgeSeen, from, to);
+						}
+					}
+					current = next;
+				}
+
+				var nodes = new JArray(nodeList.Select(m => (object)new JObject {
+					["name"] = Dotted(m),
+					["token"] = Token(m.MDToken),
+				}).ToArray());
+
+				return Json(new JObject {
+					["root"] = Dotted(targets[0]),
+					["rootToken"] = Token(targets[0].MDToken),
+					["direction"] = direction,
+					["depth"] = depth,
+					["edges"] = edges,
+					["nodes"] = nodes,
+					["truncated"] = truncated,
+				});
+			}
+		}
+
+		// The edges around `m` for the requested directions, each as (from-caller, to-callee, neighbor). The
+		// callee side reads the body's call/newobj/ldftn targets (the IsCall set) and keeps those that resolve
+		// to a method inside `scope`; the caller side is find_references' caller scan (Same/IsCall).
+		static IEnumerable<(MethodDef from, MethodDef to, MethodDef neighbor)> Neighbors(
+				MethodDef m, List<ModuleDef> modules, HashSet<string> scope, bool wantCallers, bool wantCallees) {
+			if (wantCallees && m.HasBody) {
+				foreach (var instr in m.Body.Instructions) {
+					if (!IsCall(instr.OpCode.Code) || instr.Operand is not IMethod called || called.IsField)
+						continue;
+					if (called.ResolveMethodDef() is MethodDef callee && scope.Contains(ModuleKey(callee.Module)))
+						yield return (m, callee, callee);
+				}
+			}
+			if (wantCallers) {
+				foreach (var caller in CallersOf(m, modules))
+					yield return (caller, m, caller);
+			}
+		}
+
+		// Methods anywhere in `modules` that call `target` — one hit per method, the same scan MethodCallers uses.
+		static IEnumerable<MethodDef> CallersOf(MethodDef target, List<ModuleDef> modules) {
+			foreach (var m in modules.SelectMany(EnumerateMethods)) {
+				if (!m.HasBody)
+					continue;
+				foreach (var instr in m.Body.Instructions) {
+					if (!IsCall(instr.OpCode.Code) || instr.Operand is not IMethod called || called.IsField)
+						continue;
+					if (Same(called, target)) {
+						yield return m;
+						break;
+					}
+				}
+			}
+		}
+
+		static void AddEdge(JArray edges, HashSet<string> seen, MethodDef from, MethodDef to) {
+			if (!seen.Add(MethodKey(from) + "->" + MethodKey(to)))
+				return;
+			edges.Add(new JObject {
+				["from"] = Dotted(from),
+				["fromToken"] = Token(from.MDToken),
+				["to"] = Dotted(to),
+				["toToken"] = Token(to.MDToken),
+			});
+		}
 
 		string ExtractIocs(JObject args) {
 			var module = ReqStr(args, "module");

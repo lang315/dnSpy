@@ -61,7 +61,7 @@ Or add to your MCP client config:
 Call `dnspy_info` at any time to check which instance you reached, whether authentication is on and
 which settings file it is using.
 
-## Tools (44)
+## Tools (45)
 
 Endpoint:
 - `dnspy_info` — which dnSpy this is, its version and port, whether a token is required and where it
@@ -77,6 +77,7 @@ Static analysis (no debug session — read and explore an assembly on disk or op
 - `find_implementations` — the methods that override or implement a virtual/abstract/interface method
   (the forward direction of the hierarchy), within the module or every open assembly
 - `type_hierarchy` — a type's base types and interfaces, and/or its derived types and implementers
+- `call_graph` — the caller/callee graph of a method to a given depth (flow navigation within the module)
 - `extract_iocs` — URLs, IPs, registry keys, file paths, e-mail addresses and P/Invoke imports found by
   static reading, each tied to the method it appears in; for triage and malware-analysis reporting
 - `list_resources` / `extract_resource` — enumerate manifest resources and extract an embedded one
