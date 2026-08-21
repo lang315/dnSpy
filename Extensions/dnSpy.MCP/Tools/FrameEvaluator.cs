@@ -106,6 +106,35 @@ namespace dnSpy.MCP.Tools {
 			}
 		}
 
+		/// <summary>
+		/// Evaluates <paramref name="expression"/> against the top frame of <paramref name="thread"/> for a
+		/// tracepoint hit and returns the formatted value. MUST be called on the dispatcher — the
+		/// <see cref="DbgManager.MessageBoundBreakpoint"/> handler already is. Throws
+		/// <see cref="InvalidOperationException"/> on an evaluator error or if the thread has no frame.
+		///
+		/// Unlike <see cref="WithFrame"/> this deliberately does NOT require
+		/// <see cref="DbgProcessState.Paused"/>: a tracepoint fires during an internal engine stop where
+		/// the program is physically halted but <see cref="DbgProcess.State"/> still reads Running (the
+		/// engine takes its auto-resume path without ever flipping the process to Paused). The frame is
+		/// readable there anyway — this is exactly how dnSpy's own tracepoint message printer formats
+		/// {expr} segments, on <c>thread.GetTopStackFrame()</c> with no state check. The func-eval timeout
+		/// is left at the language default (dnSpy's ~1s), not WithFrame's 30s, because a tracepoint stalls
+		/// the traced program while it evaluates, so a hot tracepoint must stay cheap.
+		/// </summary>
+		public string EvaluateAtTracepoint(DbgThread thread, string expression) {
+			var frame = thread.GetTopStackFrame()
+				?? throw new InvalidOperationException("the hit thread has no stack frame");
+			var language = languageService.Value.GetCurrentLanguage(thread.Runtime.RuntimeKindGuid);
+			var context = language.CreateContext(frame, cancellationToken: CancellationToken.None);
+			try {
+				var evalInfo = new DbgEvaluationInfo(context, frame, CancellationToken.None);
+				return Evaluate(evalInfo, language, expression).value;
+			}
+			finally {
+				context.Close();
+			}
+		}
+
 		public DbgThread ResolveThread(ulong? threadId) {
 			if (threadId is null)
 				return DefaultThread();

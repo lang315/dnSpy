@@ -136,6 +136,19 @@ namespace DbgTest {
 			return ticks;
 		}
 
+		/// <summary>
+		/// Called three times from <see cref="TickLoop"/>. The tracepoint tests set a tracepoint here: it
+		/// logs on every hit and auto-resumes, so they see repeated logging without a pause. The parameter
+		/// <paramref name="i"/> is in scope at method entry, so a "{i}" trace message interpolates 0,1,2.
+		/// </summary>
+		public static int Tick(int i) => i * 2;
+
+		/// <summary>Calls <see cref="Tick"/> in a short loop — the tracepoint multiplicity fixture. Reached from Warmup.</summary>
+		static void TickLoop() {
+			for (int i = 0; i < 3; i++)
+				GC.KeepAlive(Tick(i));
+		}
+
 		[DllImport("kernel32.dll", EntryPoint = "GetTickCount")]
 		static extern uint NativeGetTickCount();
 
@@ -212,6 +225,7 @@ namespace DbgTest {
 			Animal animal = new Dog();
 			SetState(7);
 			UseSecrets();
+			TickLoop();
 			GC.KeepAlive(Indicators() + greeters[0].Greet() + greeters[1].Greet() + animal.Speak()
 				+ NativeGetTickCount() + ReadState() + ReadEmbedded());
 		}

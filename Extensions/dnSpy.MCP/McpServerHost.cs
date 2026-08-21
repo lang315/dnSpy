@@ -93,9 +93,13 @@ namespace dnSpy.MCP {
 				var auth = TokenStore.Resolve(AppDirectories.SettingsFilename, Log);
 				var port = GetPort();
 				var dbg = new DbgAccess(dbgManager.Value);
+				// Created once here so the same collector both subscribes to MessageBoundBreakpoint (in
+				// Start/Stop, like ProcessPaused) and backs the trace_log tool.
+				var traceColl = new TraceCollector(dbg, languageService);
 				var tools = new List<ToolDef>();
 				tools.AddRange(new DebugTools(dbg, attachService).Create());
 				tools.AddRange(new BreakpointTools(dbg, bpService, bpFactory, hitCountService, codeLocationFactory, moduleIdProvider, documentService).Create());
+				tools.AddRange(new TracepointTools(dbg, bpService, bpFactory, hitCountService, codeLocationFactory, moduleIdProvider, documentService, traceColl).Create());
 				tools.AddRange(new InspectionTools(dbg, languageService, codeLocationFactory).Create());
 				tools.AddRange(new MemoryTools(dbg).Create());
 				tools.AddRange(new ExceptionTools(dbg, exceptionService).Create());
@@ -119,6 +123,9 @@ namespace dnSpy.MCP {
 				var mgr = dbgManager.Value;
 				mgr.ProcessPaused += OnProcessPaused;
 				pausedManager = mgr;
+				// Start collecting tracepoint hits (auto-resumed breakpoints that log) for trace_log.
+				traceColl.Subscribe();
+				traceCollector = traceColl;
 			}
 			catch (Exception ex) {
 				// Port in use / listener denied / a debugger service failed to compose — log and stay off;
@@ -128,6 +135,10 @@ namespace dnSpy.MCP {
 		}
 
 		public void Stop() {
+			if (traceCollector is not null) {
+				traceCollector.Unsubscribe();
+				traceCollector = null;
+			}
 			if (pausedManager is not null) {
 				pausedManager.ProcessPaused -= OnProcessPaused;
 				pausedManager = null;
@@ -137,6 +148,7 @@ namespace dnSpy.MCP {
 		}
 
 		DbgManager? pausedManager;
+		TraceCollector? traceCollector;
 
 		void OnProcessPaused(object? sender, ProcessPausedEventArgs e) {
 			var srv = server;

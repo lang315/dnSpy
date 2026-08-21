@@ -184,7 +184,8 @@ namespace dnSpy.MCP.Tools {
 			});
 		}
 
-		static DbgCodeBreakpointSettings MakeSettings(bool enabled, string? condition) {
+		// internal so the tracepoint tool builds its settings through the exact same path, then adds Trace.
+		internal static DbgCodeBreakpointSettings MakeSettings(bool enabled, string? condition) {
 			var settings = new DbgCodeBreakpointSettings { IsEnabled = enabled };
 			if (!string.IsNullOrEmpty(condition))
 				settings.Condition = new DbgCodeBreakpointCondition(DbgCodeBreakpointConditionKind.IsTrue, condition!);
