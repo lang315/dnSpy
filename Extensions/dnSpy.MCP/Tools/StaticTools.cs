@@ -114,6 +114,28 @@ namespace dnSpy.MCP.Tools {
 					("type", Schema.Str("The type's full name"), false),
 					("methods", Schema.Arr("The type's methods, each with name, token, static and signature"), true)));
 
+			yield return new ToolDef("diff_assemblies",
+				"Compare two .NET modules and report their metadata differences by NAME and signature, never by token (tokens are assigned per build). Lists the types added in 'new' and removed from 'old', and (unless include_methods is false) for every type present in both modules, the methods added or removed, each tagged with its declaring type and identified by full name plus signature so overloads stay distinct. Good for diffing two builds or versions of an assembly. No debug session required.",
+				Schema.Object(
+					("old", Schema.Str("Module A ('old') file path, or file name if already open in dnSpy"), true),
+					("new", Schema.Str("Module B ('new') file path, or file name if already open in dnSpy"), true),
+					("include_methods", Schema.Bool("Also diff the methods of types present in both modules (default true)"), false),
+					("max", Schema.Int("Maximum entries per list (default 1000, clamped 1-5000); truncated=true if any list exceeds it"), false)),
+				DiffAssemblies, readOnly: true,
+				outputSchema: Schema.Object(
+					("old", Schema.Str("Module A's name"), false),
+					("new", Schema.Str("Module B's name"), false),
+					("addedTypes", StrArraySchema("Full names of types in 'new' but not 'old'"), true),
+					("removedTypes", StrArraySchema("Full names of types in 'old' but not 'new'"), true),
+					("addedMethods", Schema.Arr("Methods added under a type present in both, each with type and method (full signature)"), true),
+					("removedMethods", Schema.Arr("Methods removed under a type present in both, each with type and method (full signature)"), true),
+					("counts", Schema.Object(
+						("addedTypes", Schema.Int("Total types added"), false),
+						("removedTypes", Schema.Int("Total types removed"), false),
+						("addedMethods", Schema.Int("Total methods added"), false),
+						("removedMethods", Schema.Int("Total methods removed"), false)), false),
+					("truncated", Schema.Bool("True if any list had more than 'max' entries"), false)));
+
 			yield return new ToolDef("search",
 				"Search a module for member names (wildcards * and ?) and/or string literals used in method bodies. Great as the first step on an unknown assembly — find where a URL, error message or key appears, or which members match a pattern.",
 				Schema.Object(
@@ -432,6 +454,102 @@ namespace dnSpy.MCP.Tools {
 				return Json(new JObject { ["type"] = td.FullName, ["methods"] = arr });
 			}
 		}
+
+		// Compare two modules by NAME/signature and report what changed. Deliberately token-free: dnlib
+		// assigns metadata tokens per build, so two builds of the same source would differ on every token
+		// even when nothing changed. Types are compared by full name; the methods of a type present in both
+		// by MethodDef.FullName, a full signature that keeps overloads distinct. Each list is sorted for a
+		// stable, diffable result and capped at 'max' (truncated flags a cut); counts carry the true totals.
+		string DiffAssemblies(JObject args) {
+			var oldArg = ReqStr(args, "old");
+			var newArg = ReqStr(args, "new");
+			var includeMethods = (bool?)args["include_methods"] ?? true;
+			var max = Clamp((int?)args["max"] ?? 1000, 1, MaxListItems);
+
+			lock (metadataLock) {
+				var oldMod = MetadataResolver.ResolveModule(documentService.Value, oldArg);
+				var newMod = MetadataResolver.ResolveModule(documentService.Value, newArg);
+
+				var oldTypes = TypesByName(oldMod);
+				var newTypes = TypesByName(newMod);
+
+				var addedTypes = newTypes.Keys.Where(n => !oldTypes.ContainsKey(n))
+					.OrderBy(n => n, StringComparer.Ordinal).ToList();
+				var removedTypes = oldTypes.Keys.Where(n => !newTypes.ContainsKey(n))
+					.OrderBy(n => n, StringComparer.Ordinal).ToList();
+
+				var addedMethods = new List<(string type, string method)>();
+				var removedMethods = new List<(string type, string method)>();
+				if (includeMethods) {
+					// Only a type present in BOTH modules can have its method set compared; a method under an
+					// added or removed type is already implied by that type appearing in the type lists.
+					foreach (var name in oldTypes.Keys.Where(newTypes.ContainsKey).OrderBy(n => n, StringComparer.Ordinal)) {
+						var oldSet = MethodIdentities(oldTypes[name]);
+						var newSet = MethodIdentities(newTypes[name]);
+						foreach (var m in newSet.Where(m => !oldSet.Contains(m)).OrderBy(m => m, StringComparer.Ordinal))
+							addedMethods.Add((name, m));
+						foreach (var m in oldSet.Where(m => !newSet.Contains(m)).OrderBy(m => m, StringComparer.Ordinal))
+							removedMethods.Add((name, m));
+					}
+				}
+
+				var truncated = addedTypes.Count > max || removedTypes.Count > max ||
+					addedMethods.Count > max || removedMethods.Count > max;
+
+				return Json(new JObject {
+					["old"] = oldMod.Name?.String,
+					["new"] = newMod.Name?.String,
+					["addedTypes"] = StrArray(addedTypes, max),
+					["removedTypes"] = StrArray(removedTypes, max),
+					["addedMethods"] = MethodArray(addedMethods, max),
+					["removedMethods"] = MethodArray(removedMethods, max),
+					["counts"] = new JObject {
+						["addedTypes"] = addedTypes.Count,
+						["removedTypes"] = removedTypes.Count,
+						["addedMethods"] = addedMethods.Count,
+						["removedMethods"] = removedMethods.Count,
+					},
+					["truncated"] = truncated,
+				});
+			}
+		}
+
+		// A module's types keyed by full name, the identity the whole diff uses. Includes every type
+		// (<Module> and compiler-generated ones too), matching list_types. Full names are unique within a
+		// module, so last-wins on a collision is only defensive.
+		static Dictionary<string, TypeDef> TypesByName(ModuleDef mod) {
+			var map = new Dictionary<string, TypeDef>(StringComparer.Ordinal);
+			foreach (var t in mod.GetTypes())
+				map[t.FullName] = t;
+			return map;
+		}
+
+		// The set of method identities for one type. MethodDef.FullName is a full signature
+		// ("RetType NS.Type::Method(args)"): stable across builds and keeps overloads distinct.
+		static HashSet<string> MethodIdentities(TypeDef t) {
+			var set = new HashSet<string>(StringComparer.Ordinal);
+			foreach (var m in t.Methods)
+				set.Add(m.FullName);
+			return set;
+		}
+
+		static JArray StrArray(IEnumerable<string> items, int max) {
+			var arr = new JArray();
+			foreach (var s in items.Take(max))
+				arr.Add(s);
+			return arr;
+		}
+
+		static JArray MethodArray(IEnumerable<(string type, string method)> methods, int max) {
+			var arr = new JArray();
+			foreach (var (type, method) in methods.Take(max))
+				arr.Add(new JObject { ["type"] = type, ["method"] = method });
+			return arr;
+		}
+
+		// A JSON-schema fragment for an array-of-strings output property (Schema.Arr is array-of-object).
+		static JObject StrArraySchema(string description) =>
+			new JObject { ["type"] = "array", ["description"] = description, ["items"] = new JObject { ["type"] = "string" } };
 
 		string Search(JObject args) {
 			var module = ReqStr(args, "module");
