@@ -61,7 +61,7 @@ Or add to your MCP client config:
 Call `dnspy_info` at any time to check which instance you reached, whether authentication is on and
 which settings file it is using.
 
-## Tools (48)
+## Tools (49)
 
 Endpoint:
 - `dnspy_info` — which dnSpy this is, its version and port, whether a token is required and where it
@@ -119,6 +119,14 @@ Inspection (require a paused process):
 - `decrypt_strings` — recover obfuscated string constants: find a decryptor method's call sites, read the
   constant argument at each, and (in a paused process) func-evaluate the decryptor to get the plaintext;
   `dry_run` lists the call sites and arguments without a session
+
+Live / packed analysis (requires a paused process):
+- `dump_module` — dump a module loaded in the debuggee to a loadable .NET assembly on disk, read from
+  process memory (so a packed/protected module is captured in its unpacked, in-RAM form), then analyse the
+  file with the static tools. Derives the true image size from the section table (not the unreliable module
+  size), unmaps memory→file layout, and reconstructs a zeroed COR20/.NET data directory (a common anti-dump
+  trick). Note: protectors that *virtualize* the metadata — keep the type tables out of the mapped image —
+  yield a loadable but sparse dump; use the on-disk file when it parses.
 
 Read-only tools carry a `readOnlyHint` annotation; process-changing tools (`dbg_start`, `dbg_write_memory`, `dbg_set_variable`, …) carry `destructiveHint`.
 

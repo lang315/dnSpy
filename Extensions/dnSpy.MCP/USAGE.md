@@ -207,6 +207,7 @@ Kết quả trả về là JSON dạng text. Lỗi trả về dưới dạng MCP
 | `dbg_read_memory` | `address`, `size` (bắt buộc), `pid` | Đọc byte thô từ memory tiến trình, trả về hex (tối đa 65536 byte). |
 | `dbg_write_memory` | `address`, `bytes` (bắt buộc), `pid` | Ghi byte thô (hex) vào memory tiến trình. |
 | `decrypt_strings` | `module`, `method`\|`token` (decryptor, bắt buộc), `max_calls`, `dry_run` | Khôi phục chuỗi bị mã hoá: tìm call-site của hàm decrypt, đọc hằng số đối số, rồi (khi process đang paused) func-eval hàm decrypt để lấy plaintext. `dry_run` chỉ liệt kê call-site + đối số, không cần session. |
+| `dump_module` | `module` (bắt buộc), `save_path` | Dump 1 module đã nạp trong tiến trình ra file .NET trên đĩa, đọc từ bộ nhớ (bắt được dạng đã unpack). Tự tính size thật từ **section table**, unmap memory→file, và **dựng lại COR20 directory bị zero** (anti-dump), rồi phân tích file bằng tool tĩnh. *Hạn chế:* protector virtualize metadata → dump load được nhưng rỗng; dùng file trên đĩa nếu parse được. Cần process paused. |
 
 Tool chỉ đọc mang annotation `readOnlyHint`; tool thay đổi tiến trình (`dbg_start`, `dbg_write_memory`, `dbg_set_variable`, …) mang `destructiveHint` để client cảnh báo.
 
