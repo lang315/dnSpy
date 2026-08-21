@@ -147,6 +147,7 @@ Kết quả trả về là JSON dạng text. Lỗi trả về dưới dạng MCP
 | `list_types` | `module` (bắt buộc), `filter`, `max` | Liệt kê type trong module (tên đầy đủ, token, kind); `filter` là pattern `*`/`?`. |
 | `list_methods` | `module`, `type` (bắt buộc) | Liệt kê method của 1 type kèm token + chữ ký — đưa token cho `bp_add`/`decompile`. |
 | `decompile` | `module` (bắt buộc), `method`\|`type`\|`token`, `format` | Dịch ngược 1 method (mọi overload)/type/token → C#; `format="il"` để xem IL (opcode + offset, hữu ích với code bị obfuscate). |
+| `decompile_batch` | `module` (bắt buộc), `type`\|`namespace`\|`filter`, `out_dir`, `format`, `max` | Dịch ngược **hàng loạt** mọi type khớp ra 1 thư mục file `.cs`/`.il` (không cắt bớt) — để export + grep. |
 | `search` | `module`, `query` (bắt buộc), `kind`, `max` | Tìm tên member (`*`/`?`) và/hoặc chuỗi literal trong thân method, kèm vị trí + token. |
 | `find_references` | `module` (bắt buộc), `method`\|`field`\|`type`\|`token`, `access`, `scope`, `max` | Nơi một **method/field/type** được dùng: method → caller; field → đọc/ghi (`access`=reads\|writes\|all); type → method dùng nó (khởi tạo/cast/gọi/local/catch). `token` tự nhận loại. `scope="open"` quét mọi assembly đang mở. |
 | `find_implementations` | `module` (bắt buộc), `method`\|`token`, `scope`, `max` | Các method **override/hiện thực** một method ảo/abstract/interface (chiều xuôi của cây kế thừa) — bổ sung cho `find_references`. |
