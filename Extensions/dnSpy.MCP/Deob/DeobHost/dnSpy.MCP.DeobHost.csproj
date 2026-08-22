@@ -3,7 +3,7 @@
   <!--
       Out-of-process de4dot host for the dnSpy.MCP `deobfuscate` tool. Like the HeapHelper, it is
       deliberately NOT part of dnSpy.sln and does NOT import ../../../DnSpyCommon.props: it drives the
-      de4dotEx engine (a git submodule at ../de4dotEx), which has its own TFM (net8.0), signing key and
+      de4dotEx engine (vendored in-tree at ../de4dotEx), which has its own TFM (net8.0), signing key and
       dnlib 4.5. dnSpy's type identity must never touch de4dot's dnlib, so all de4dot work happens here,
       in a separate process, file-in/file-out. The extension publishes this host into
       <extension bin>/Deob/ via an AfterTargets step in ../../dnSpy.MCP.csproj and spawns it per call.

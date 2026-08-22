@@ -19,11 +19,7 @@
 
 using System;
 using System.Collections.Generic;
-using System.Diagnostics;
 using System.IO;
-using System.Reflection;
-using System.Text;
-using System.Threading.Tasks;
 using Newtonsoft.Json.Linq;
 using static dnSpy.MCP.Tools.JsonUtils;
 
@@ -97,16 +93,8 @@ namespace dnSpy.MCP.Tools {
 				argv.Add(obfuscator!);
 			}
 
-			var (exitCode, stdout, stderr) = Spawn(host, argv);
-
-			JObject result;
-			try {
-				result = JObject.Parse(stdout);
-			}
-			catch (Exception ex) {
-				var detail = string.IsNullOrWhiteSpace(stderr) ? stdout : stderr;
-				throw new InvalidOperationException($"the deobfuscation host did not return valid JSON (exit {exitCode}): {TrimText(detail)} [{ex.Message}]");
-			}
+			var result = HelperProcess.Run(host, argv, HostTimeoutMs, "the deobfuscation host",
+				"the assembly may be very large or heavily packed");
 
 			if ((bool?)result["ok"] != true) {
 				var err = (string?)result["error"] ?? "deobfuscation failed";
@@ -127,129 +115,9 @@ namespace dnSpy.MCP.Tools {
 			return Json(shaped);
 		}
 
-		// Find dnSpy.MCP.DeobHost.exe next to this extension. It is published to <extension dir>\Deob\;
-		// probe that first, then one directory up (covers the build.ps1 layout where the extension DLL and
-		// the Deob folder move together) and AppContext.BaseDirectory as a fallback.
-		static string LocateHost() {
-			const string exeName = "dnSpy.MCP.DeobHost.exe";
-
-			var bases = new List<string>();
-			var loc = Assembly.GetExecutingAssembly().Location;
-			if (!string.IsNullOrEmpty(loc)) {
-				var dir = Path.GetDirectoryName(loc);
-				if (!string.IsNullOrEmpty(dir)) {
-					bases.Add(dir!);
-					var parent = Path.GetDirectoryName(dir);
-					if (!string.IsNullOrEmpty(parent))
-						bases.Add(parent!);
-				}
-			}
-			var baseDir = AppContext.BaseDirectory;
-			if (!string.IsNullOrEmpty(baseDir))
-				bases.Add(baseDir);
-
-			foreach (var b in bases) {
-				var candidate = Path.Combine(b, "Deob", exeName);
-				if (File.Exists(candidate))
-					return candidate;
-			}
-
-			var expected = bases.Count > 0
-				? Path.Combine(bases[0], "Deob", exeName)
-				: Path.Combine("Deob", exeName);
-			throw new InvalidOperationException(
-				$"the deobfuscation host ({exeName}) was not found next to the extension (expected under Deob\\). " +
-				"Ensure the de4dotEx submodule is initialised (git submodule update --init --recursive) and rebuild the dnSpy.MCP extension so the host is published. " +
-				$"Expected path: {expected}");
-		}
-
-		// Run the host with stdout/stderr redirected and no window, on the calling (request) thread. stdout
-		// is read to completion; the process is killed if it overruns the timeout.
-		(int exitCode, string stdout, string stderr) Spawn(string exe, List<string> argv) {
-			var psi = new ProcessStartInfo {
-				FileName = exe,
-				Arguments = BuildArguments(argv),
-				UseShellExecute = false,
-				RedirectStandardOutput = true,
-				RedirectStandardError = true,
-				CreateNoWindow = true,
-				WorkingDirectory = Path.GetDirectoryName(exe) ?? Environment.CurrentDirectory,
-				StandardOutputEncoding = Encoding.UTF8,
-				StandardErrorEncoding = Encoding.UTF8,
-			};
-
-			using var proc = new Process { StartInfo = psi };
-			try {
-				proc.Start();
-			}
-			catch (Exception ex) {
-				throw new InvalidOperationException($"could not start the deobfuscation host ({exe}): {ex.Message}");
-			}
-
-			var outTask = proc.StandardOutput.ReadToEndAsync();
-			var errTask = proc.StandardError.ReadToEndAsync();
-
-			if (!proc.WaitForExit(HostTimeoutMs)) {
-				try { proc.Kill(); } catch { /* already gone */ }
-				throw new InvalidOperationException($"the deobfuscation host did not finish within {HostTimeoutMs / 1000} s and was terminated (the assembly may be very large or heavily packed)");
-			}
-			proc.WaitForExit();
-
-			return (proc.ExitCode, SafeResult(outTask), SafeResult(errTask));
-		}
-
-		static string SafeResult(Task<string> task) {
-			try {
-				return task.GetAwaiter().GetResult() ?? string.Empty;
-			}
-			catch {
-				return string.Empty;
-			}
-		}
-
-		// Quote arguments per the Windows CommandLineToArgvW rules so a path with spaces, quotes or trailing
-		// backslashes round-trips. (net48 has no ProcessStartInfo.ArgumentList.)
-		static string BuildArguments(List<string> argv) {
-			var sb = new StringBuilder();
-			foreach (var a in argv) {
-				if (sb.Length > 0)
-					sb.Append(' ');
-				AppendArgument(sb, a);
-			}
-			return sb.ToString();
-		}
-
-		static void AppendArgument(StringBuilder sb, string arg) {
-			if (arg.Length > 0 && arg.IndexOfAny(new[] { ' ', '\t', '\n', '\v', '"' }) < 0) {
-				sb.Append(arg);
-				return;
-			}
-			sb.Append('"');
-			for (int i = 0; ; i++) {
-				var backslashes = 0;
-				while (i < arg.Length && arg[i] == '\\') {
-					i++;
-					backslashes++;
-				}
-				if (i == arg.Length) {
-					sb.Append('\\', backslashes * 2);
-					break;
-				}
-				if (arg[i] == '"') {
-					sb.Append('\\', backslashes * 2 + 1);
-					sb.Append('"');
-				}
-				else {
-					sb.Append('\\', backslashes);
-					sb.Append(arg[i]);
-				}
-			}
-			sb.Append('"');
-		}
-
-		static string TrimText(string s) {
-			s = s.Trim();
-			return s.Length <= 500 ? s : s.Substring(0, 500) + "…";
-		}
+		// Find dnSpy.MCP.DeobHost.exe next to this extension; it is published to <extension dir>\Deob\.
+		static string LocateHost() =>
+			HelperProcess.Locate(Path.Combine("Deob", "dnSpy.MCP.DeobHost.exe"),
+				"The host is built from the de4dotEx source vendored in-tree under Extensions\\dnSpy.MCP\\Deob\\de4dotEx; restore that tree from git if it was deleted, then rebuild the dnSpy.MCP extension so the host is published.");
 	}
 }

@@ -19,12 +19,8 @@
 
 using System;
 using System.Collections.Generic;
-using System.Diagnostics;
 using System.Globalization;
 using System.IO;
-using System.Reflection;
-using System.Text;
-using System.Threading.Tasks;
 using dnSpy.Contracts.Debugger;
 using dnSpy.MCP.Server;
 using Newtonsoft.Json.Linq;
@@ -121,7 +117,11 @@ namespace dnSpy.MCP.Tools {
 			if (!snap.Paused)
 				throw new InvalidOperationException("the process must be paused (hit a breakpoint or call dbg_break) before its managed heap can be walked");
 
-			var helper = LocateHelper(snap.Bitness);
+			// ClrMD reads the debuggee's DAC in-process, so the helper's bitness must match the debuggee's;
+			// both are published under <extension dir>\HeapHelper\win-{x64,x86}\.
+			var rid = snap.Bitness == 32 ? "win-x86" : "win-x64";
+			var helper = HelperProcess.Locate(Path.Combine("HeapHelper", rid, "dnSpy.MCP.HeapHelper.exe"),
+				"Rebuild the dnSpy.MCP extension so the helper is published, then retry.");
 
 			var argv = new List<string>(2 + extraArgs.Length) {
 				command,
@@ -129,151 +129,12 @@ namespace dnSpy.MCP.Tools {
 			};
 			argv.AddRange(extraArgs);
 
-			var (exitCode, stdout, stderr) = Spawn(helper, argv);
-
-			JObject result;
-			try {
-				result = JObject.Parse(stdout);
-			}
-			catch (Exception ex) {
-				var detail = string.IsNullOrWhiteSpace(stderr) ? stdout : stderr;
-				throw new InvalidOperationException($"the heap helper did not return valid JSON (exit {exitCode}): {Trim(detail)} [{ex.Message}]");
-			}
+			var result = HelperProcess.Run(helper, argv, HelperTimeoutMs, "the heap helper",
+				"the heap may be extremely large, or the target resumed");
 			var err = (string?)result["error"];
 			if (err is not null)
 				throw new InvalidOperationException("heap helper: " + err);
 			return Json(result);
-		}
-
-		// Find dnSpy.MCP.HeapHelper.exe for the target bitness next to this extension. The helper is
-		// published to <extension dir>\HeapHelper\win-{x64|x86}\; probe that first, then one directory up
-		// (covers the build.ps1 layout where the extension DLL and the HeapHelper folder move together)
-		// and AppContext.BaseDirectory as a fallback.
-		static string LocateHelper(int bitness) {
-			var rid = bitness == 32 ? "win-x86" : "win-x64";
-			const string exeName = "dnSpy.MCP.HeapHelper.exe";
-
-			var bases = new List<string>();
-			var loc = Assembly.GetExecutingAssembly().Location;
-			if (!string.IsNullOrEmpty(loc)) {
-				var dir = Path.GetDirectoryName(loc);
-				if (!string.IsNullOrEmpty(dir)) {
-					bases.Add(dir!);
-					var parent = Path.GetDirectoryName(dir);
-					if (!string.IsNullOrEmpty(parent))
-						bases.Add(parent!);
-				}
-			}
-			var baseDir = AppContext.BaseDirectory;
-			if (!string.IsNullOrEmpty(baseDir))
-				bases.Add(baseDir);
-
-			foreach (var b in bases) {
-				var candidate = Path.Combine(b, "HeapHelper", rid, exeName);
-				if (File.Exists(candidate))
-					return candidate;
-			}
-
-			var expected = bases.Count > 0
-				? Path.Combine(bases[0], "HeapHelper", rid, exeName)
-				: Path.Combine("HeapHelper", rid, exeName);
-			throw new InvalidOperationException(
-				$"the {rid} heap helper ({exeName}) was not found next to the extension (expected under HeapHelper\\{rid}). " +
-				$"Rebuild the dnSpy.MCP extension so the helper is published, then retry. Expected path: {expected}");
-		}
-
-		// Run the helper with stdout/stderr redirected and no window, on the calling (request) thread.
-		// stdout is read to completion; the process is killed if it overruns the timeout.
-		(int exitCode, string stdout, string stderr) Spawn(string exe, List<string> argv) {
-			var psi = new ProcessStartInfo {
-				FileName = exe,
-				Arguments = BuildArguments(argv),
-				UseShellExecute = false,
-				RedirectStandardOutput = true,
-				RedirectStandardError = true,
-				CreateNoWindow = true,
-				WorkingDirectory = Path.GetDirectoryName(exe) ?? Environment.CurrentDirectory,
-				StandardOutputEncoding = Encoding.UTF8,
-				StandardErrorEncoding = Encoding.UTF8,
-			};
-
-			using var proc = new Process { StartInfo = psi };
-			try {
-				proc.Start();
-			}
-			catch (Exception ex) {
-				throw new InvalidOperationException($"could not start the heap helper ({exe}): {ex.Message}");
-			}
-
-			// Read both streams asynchronously before waiting, so a large payload cannot deadlock on a
-			// full pipe buffer.
-			var outTask = proc.StandardOutput.ReadToEndAsync();
-			var errTask = proc.StandardError.ReadToEndAsync();
-
-			if (!proc.WaitForExit(HelperTimeoutMs)) {
-				try { proc.Kill(); } catch { /* already gone */ }
-				throw new InvalidOperationException($"the heap helper did not finish within {HelperTimeoutMs / 1000} s and was terminated (the heap may be extremely large, or the target resumed)");
-			}
-			// The timed overload can return before the redirected streams have flushed; block for the rest.
-			proc.WaitForExit();
-
-			return (proc.ExitCode, SafeResult(outTask), SafeResult(errTask));
-		}
-
-		static string SafeResult(Task<string> task) {
-			try {
-				return task.GetAwaiter().GetResult() ?? string.Empty;
-			}
-			catch {
-				return string.Empty;
-			}
-		}
-
-		// Quote arguments per the Windows CommandLineToArgvW rules so a type name with spaces, quotes or
-		// trailing backslashes round-trips. (net48 has no ProcessStartInfo.ArgumentList.)
-		static string BuildArguments(List<string> argv) {
-			var sb = new StringBuilder();
-			foreach (var a in argv) {
-				if (sb.Length > 0)
-					sb.Append(' ');
-				AppendArgument(sb, a);
-			}
-			return sb.ToString();
-		}
-
-		static void AppendArgument(StringBuilder sb, string arg) {
-			if (arg.Length > 0 && arg.IndexOfAny(new[] { ' ', '\t', '\n', '\v', '"' }) < 0) {
-				sb.Append(arg);
-				return;
-			}
-			sb.Append('"');
-			for (int i = 0; ; i++) {
-				var backslashes = 0;
-				while (i < arg.Length && arg[i] == '\\') {
-					i++;
-					backslashes++;
-				}
-				if (i == arg.Length) {
-					// Escape all trailing backslashes so the closing quote is not consumed.
-					sb.Append('\\', backslashes * 2);
-					break;
-				}
-				if (arg[i] == '"') {
-					// Escape the backslashes preceding the quote, then the quote itself.
-					sb.Append('\\', backslashes * 2 + 1);
-					sb.Append('"');
-				}
-				else {
-					sb.Append('\\', backslashes);
-					sb.Append(arg[i]);
-				}
-			}
-			sb.Append('"');
-		}
-
-		static string Trim(string s) {
-			s = s.Trim();
-			return s.Length <= 500 ? s : s.Substring(0, 500) + "…";
 		}
 
 		// The one debugger-object touch, marshalled onto the dispatcher: a trivial, instant snapshot of the
