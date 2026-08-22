@@ -1,0 +1,39 @@
+name: dnSpy.MCP tests
+
+# Runs the Tier 1 protocol/security tests for the dnSpy.MCP extension. These stand up a real
+# McpServer over loopback HTTP with stub tools, so they need neither dnSpy, WPF nor a debug engine
+# and run headless on a hosted runner. The Tier 2 integration tests and Tier 3 conformance run
+# require an interactive desktop and a live debug engine, so they stay manual (tests/run-integration.ps1).
+
+on:
+  push:
+    branches:
+      - master
+      - 'feat/**'
+    paths:
+      - 'Extensions/dnSpy.MCP/**'
+      - 'tests/**'
+      - '.github/workflows/mcp-tests.yml'
+  pull_request:
+    paths:
+      - 'Extensions/dnSpy.MCP/**'
+      - 'tests/**'
+      - '.github/workflows/mcp-tests.yml'
+  workflow_dispatch:
+
+jobs:
+  tier1:
+    name: Tier 1 (protocol + security)
+    runs-on: windows-latest
+    steps:
+      # No submodules: the extension and its contract references live in the main tree, and dnlib
+      # comes from NuGet, so the Tier 1 build needs nothing from the submodules.
+      - uses: actions/checkout@v7.0.1
+
+      - uses: actions/setup-dotnet@v6.0.0
+        with:
+          dotnet-version: 10.0.x
+          dotnet-quality: ga
+
+      - name: Run Tier 1 tests
+        run: dotnet test tests/dnSpy.MCP.Tests -c Release --nologo

@@ -1,0 +1,106 @@
+<Project Sdk="Microsoft.NET.Sdk.WindowsDesktop">
+
+  <Import Project="..\..\DnSpyCommon.props" />
+
+  <PropertyGroup>
+    <Copyright>$(DnSpyAssemblyCopyright)</Copyright>
+    <Version>$(DnSpyAssemblyVersion)</Version>
+    <InformationalVersion>$(DnSpyAssemblyInformationalVersion)</InformationalVersion>
+
+    <AssemblyName>dnSpy.MCP.x</AssemblyName>
+    <SignAssembly>True</SignAssembly>
+    <AssemblyOriginatorKeyFile>..\..\dnSpy.snk</AssemblyOriginatorKeyFile>
+    <OutputPath>..\..\dnSpy\dnSpy\bin\$(Configuration)\</OutputPath>
+    <Nullable>enable</Nullable>
+    <UseWPF>true</UseWPF>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\dnSpy\dnSpy.Contracts.DnSpy\dnSpy.Contracts.DnSpy.csproj" />
+    <ProjectReference Include="..\..\dnSpy\dnSpy.Contracts.Logic\dnSpy.Contracts.Logic.csproj" />
+    <ProjectReference Include="..\..\dnSpy\dnSpy.Contracts.Debugger\dnSpy.Contracts.Debugger.csproj" />
+    <ProjectReference Include="..\..\dnSpy\dnSpy.Contracts.Debugger.DotNet\dnSpy.Contracts.Debugger.DotNet.csproj" />
+    <ProjectReference Include="..\..\dnSpy\dnSpy.Contracts.Debugger.DotNet.CorDebug\dnSpy.Contracts.Debugger.DotNet.CorDebug.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Newtonsoft.Json" Version="$(NewtonsoftJsonVersion)" />
+    <!-- NOTE: the heap tools (heap_stats/find/object) no longer reference ClrMD in-process. dnSpy's
+         bundled ClrMD is 1.1 and cannot walk a .NET 6+ "regions" GC heap. The walk now runs in the
+         out-of-process HeapHelper (below), which references ClrMD 4.x. -->
+  </ItemGroup>
+
+  <!-- The HeapHelper is a nested but independent project (its own net10.0 runtime + ClrMD 4.x). It is
+       NOT compiled as part of this extension, so exclude its sources from the SDK's default globs. -->
+  <ItemGroup>
+    <Compile Remove="HeapHelper\**\*.cs" />
+    <None Remove="HeapHelper\**\*" />
+    <EmbeddedResource Remove="HeapHelper\**\*" />
+  </ItemGroup>
+
+  <!-- The Deob host + the vendored de4dotEx source are likewise nested-but-independent (net10.0 console
+       driving the de4dot engine on net8.0). NOT compiled into this extension — exclude every source under
+       Deob\ (the host AND the whole vendored de4dotEx tree) from the SDK's default globs. -->
+  <ItemGroup>
+    <Compile Remove="Deob\**\*.cs" />
+    <None Remove="Deob\**\*" />
+    <EmbeddedResource Remove="Deob\**\*" />
+    <Page Remove="Deob\**\*" />
+  </ItemGroup>
+
+  <!--
+      Publish the HeapHelper for BOTH bitnesses next to this extension's output so it can be located
+      and spawned at runtime from <extension bin>/HeapHelper/win-{x64,x86}/dnSpy.MCP.HeapHelper.exe.
+      ClrMD reads the debuggee's DAC in-process, so the helper's bitness must match the debuggee's
+      (== dnSpy's), hence both RIDs. Framework-dependent (small), matching dnSpy's own net10.0-windows
+      build. Incremental via Inputs/Outputs, so repeat builds skip it. Runs on a plain `dotnet build`
+      of this project (what the Tier 2 gate uses) and on the full msbuild solution build alike; it only
+      shells out to `dotnet publish` for the helper and never touches dnSpy's own build graph. -->
+  <Target Name="PublishHeapHelper" AfterTargets="Build"
+          Inputs="$(MSBuildProjectDirectory)\HeapHelper\dnSpy.MCP.HeapHelper.csproj;$(MSBuildProjectDirectory)\HeapHelper\Program.cs"
+          Outputs="$(OutDir)HeapHelper\win-x64\dnSpy.MCP.HeapHelper.exe;$(OutDir)HeapHelper\win-x86\dnSpy.MCP.HeapHelper.exe">
+    <PropertyGroup>
+      <_HeapHelperProj>$(MSBuildProjectDirectory)\HeapHelper\dnSpy.MCP.HeapHelper.csproj</_HeapHelperProj>
+      <_HeapHelperOut>$([System.IO.Path]::GetFullPath('$(MSBuildProjectDirectory)\$(OutDir)HeapHelper'))</_HeapHelperOut>
+    </PropertyGroup>
+    <Message Importance="high" Text="dnSpy.MCP: publishing HeapHelper (win-x64, win-x86) -> $(_HeapHelperOut)" />
+    <Exec Command="dotnet publish &quot;$(_HeapHelperProj)&quot; -c $(Configuration) -r win-x64 --self-contained false -o &quot;$(_HeapHelperOut)\win-x64&quot; --nologo -v quiet" />
+    <Exec Command="dotnet publish &quot;$(_HeapHelperProj)&quot; -c $(Configuration) -r win-x86 --self-contained false -o &quot;$(_HeapHelperOut)\win-x86&quot; --nologo -v quiet" />
+  </Target>
+
+  <!--
+      Publish the de4dot Deob host next to this extension's output so the `deobfuscate` tool can locate
+      and spawn it from <extension bin>/Deob/dnSpy.MCP.DeobHost.exe. de4dot is a pure managed file
+      transform (no bitness matching), so a single framework-dependent win-x64 apphost serves every
+      debuggee, matching dnSpy's own net10.0-windows runtime. The host builds the vendored de4dotEx source
+      (net8.0) transitively; those engine DLLs land in the same folder. Incremental via Inputs/Outputs.
+      Only shells out to `dotnet publish` for the host — it never touches dnSpy's own build graph.
+
+      de4dotEx is vendored in-tree under Deob\de4dotEx (no submodule to fetch). The Exists gate below is a
+      harmless safety net: if that tree is ever deleted, the publish is skipped with a warning rather than
+      failing the extension build, so dnSpy still builds — just without this one tool.
+  -->
+  <Target Name="PublishDeobHost" AfterTargets="Build"
+          Condition="Exists('$(MSBuildProjectDirectory)\Deob\de4dotEx\de4dot.cui\de4dot.cui.csproj')"
+          Inputs="$(MSBuildProjectDirectory)\Deob\DeobHost\dnSpy.MCP.DeobHost.csproj;$(MSBuildProjectDirectory)\Deob\DeobHost\Program.cs"
+          Outputs="$(OutDir)Deob\dnSpy.MCP.DeobHost.exe">
+    <PropertyGroup>
+      <_DeobHostProj>$(MSBuildProjectDirectory)\Deob\DeobHost\dnSpy.MCP.DeobHost.csproj</_DeobHostProj>
+      <_DeobHostOut>$([System.IO.Path]::GetFullPath('$(MSBuildProjectDirectory)\$(OutDir)Deob'))</_DeobHostOut>
+    </PropertyGroup>
+    <Message Importance="high" Text="dnSpy.MCP: publishing de4dot Deob host (win-x64) -> $(_DeobHostOut)" />
+    <!-- ContinueOnError: de4dot is a large third-party (vendored) codebase; if it ever fails to build, that
+         must NOT break dnSpy's own build/CI. A failed publish just means the deobfuscate tool's host is
+         absent, which the tool reports cleanly at runtime (LocateHost). The follow-up Warning makes it visible. -->
+    <Exec Command="dotnet publish &quot;$(_DeobHostProj)&quot; -c $(Configuration) -r win-x64 --self-contained false -o &quot;$(_DeobHostOut)&quot; --nologo -v quiet"
+          ContinueOnError="true" />
+    <Warning Condition="!Exists('$(OutDir)Deob\dnSpy.MCP.DeobHost.exe')"
+             Text="dnSpy.MCP: the de4dot Deob host failed to publish — the 'deobfuscate' tool will be unavailable at runtime, but dnSpy is otherwise unaffected. Check the de4dotEx build above." />
+  </Target>
+
+  <Target Name="WarnMissingDe4dot" AfterTargets="Build"
+          Condition="!Exists('$(MSBuildProjectDirectory)\Deob\de4dotEx\de4dot.cui\de4dot.cui.csproj')">
+    <Warning Text="dnSpy.MCP: the vendored de4dotEx source (Deob\de4dotEx) is missing — the 'deobfuscate' tool's host was NOT published. It is committed in-tree; restore it from git if it was deleted." />
+  </Target>
+
+</Project>

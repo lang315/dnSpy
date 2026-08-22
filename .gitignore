@@ -7,3 +7,10 @@ _ReSharper*/
 *_wpftmp.csproj
 launchSettings.json
 .idea/
+
+# Integration-test fixture build output
+tests/fixture/*/bin/
+tests/fixture/*/obj/
+
+# Integration-test TRX results (run-integration.ps1)
+TestResults/
