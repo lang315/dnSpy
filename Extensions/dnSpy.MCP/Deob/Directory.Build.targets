@@ -1,5 +1,5 @@
 <!-- Intentionally empty: see Directory.Build.props in this folder. Stops MSBuild from importing the
      repo-root Directory.Build.targets (which deletes "garbage" files/dirs from every project's output)
-     into the de4dot host or the de4dotEx submodule. -->
+     into the de4dot host or the vendored de4dotEx tree. -->
 <Project>
 </Project>

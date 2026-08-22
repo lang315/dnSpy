@@ -32,8 +32,8 @@ namespace dnSpy.MCP.IntegrationTests {
 	/// disk with nothing debugging.
 	///
 	/// MECHANISM test (red-before-impl): before this change there was no 'deobfuscate' tool, no Deob host,
-	/// and no de4dotEx submodule, so <see cref="Deobfuscating_the_fixture_yields_a_readable_copy"/> failed
-	/// at the tool call ("unknown tool"). We have no obfuscated fixture, so this proves the PLUMBING —
+	/// and no de4dotEx engine in the tree, so <see cref="Deobfuscating_the_fixture_yields_a_readable_copy"/>
+	/// failed at the tool call ("unknown tool"). We have no obfuscated fixture, so this proves the PLUMBING —
 	/// spawn, file-in/file-out, JSON contract, and that the output is a valid, readable assembly — against
 	/// the UNobfuscated fixture (de4dot detects no known obfuscator and re-saves a clean copy). A real
 	/// ConfuserEx/Reactor sample is a documented follow-up, not covered here.
