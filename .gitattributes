@@ -1,0 +1,8 @@
+# Vendored third-party source — see Extensions/dnSpy.MCP/Deob/de4dotEx/VENDORED.md
+# de4dotEx is the deobfuscation engine invoked out-of-process by the dnSpy.MCP `deobfuscate`
+# tool. Mark it vendored + generated so GitHub excludes it from the repo's language stats and
+# collapses it in pull-request diffs — it is upstream code, not this repo's own source.
+Extensions/dnSpy.MCP/Deob/de4dotEx/** linguist-vendored=true
+Extensions/dnSpy.MCP/Deob/de4dotEx/** linguist-generated=true
+# ...but keep our own provenance note visible (it is not upstream code).
+Extensions/dnSpy.MCP/Deob/de4dotEx/VENDORED.md -linguist-vendored -linguist-generated

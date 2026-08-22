@@ -1,0 +1,226 @@
+using System;
+using System.IO;
+using System.Net.Http;
+using System.Net.Sockets;
+using System.Threading;
+using dnSpy.MCP.Tests; // Rpc/RpcResponse, shared with the Tier 1 project via a linked source file
+using Newtonsoft.Json.Linq;
+using Xunit;
+
+namespace dnSpy.MCP.IntegrationTests {
+	/// <summary>
+	/// A Fact that skips itself unless a live dnSpy MCP endpoint was configured, so the suite is
+	/// harmless on a machine that is not set up for Tier 2.
+	/// </summary>
+	public sealed class DbgFactAttribute : FactAttribute {
+		public DbgFactAttribute() {
+			if (!Dbg.Configured)
+				Skip = "DNSPY_MCP_TEST_URL is not set — run tests/run-integration.ps1";
+		}
+	}
+
+	/// <summary>Talks to the running dnSpy: calls tools, waits for pauses, and resets state.</summary>
+	static class Dbg {
+		static int nextId = 1;
+
+		// Enforce the isolation check on the wire itself, not just in Dbg.Call: a future test that talks
+		// to Rpc or SseStream directly must still be unable to reach a non-isolated dnSpy. Rpc's guard is
+		// a per-assembly static, so this only arms the integration project's copy.
+		static Dbg() => Rpc.RequestGuard = _ => SafetyGate.Enforce();
+
+		public static string? Url => Environment.GetEnvironmentVariable("DNSPY_MCP_TEST_URL");
+		public static string? Token => Environment.GetEnvironmentVariable("DNSPY_MCP_TEST_TOKEN");
+		public static bool Configured => !string.IsNullOrEmpty(Url);
+
+		/// <summary>Directory holding the built fixture debuggee for the given target framework.</summary>
+		public static string FixtureDir(string tfm = "net8.0") {
+			var root = Environment.GetEnvironmentVariable("DNSPY_MCP_TEST_FIXTURE")
+				?? throw new InvalidOperationException("DNSPY_MCP_TEST_FIXTURE is not set");
+			return Path.Combine(root, tfm);
+		}
+
+		public static string FixtureDll(string tfm = "net8.0") => Path.Combine(FixtureDir(tfm), "dbgtest.dll");
+		public static string FixtureExe(string tfm = "net8.0") => Path.Combine(FixtureDir(tfm), "dbgtest.exe");
+
+		/// <summary>Set once dnSpy stops answering, so later tests report the cause rather than a symptom.</summary>
+		static volatile bool serverGone;
+
+		/// <summary>Calls a tool and returns its text payload. Throws if the tool reported an error.</summary>
+		public static string Call(string tool, JObject? args = null) {
+			if (serverGone)
+				throw new DbgServerGoneException(tool, null);
+			// Every request this suite sends to dnSpy leaves through here, so the isolation check
+			// cannot be ordered around — not by a test-class constructor, not by a new test that
+			// forgets to opt in. Nothing destructive can reach the wire ahead of it.
+			SafetyGate.Enforce();
+			RpcResponse res;
+			try {
+				res = Rpc.Post(Url!, Rpc.CallTool(Interlocked.Increment(ref nextId), tool, args), Token);
+			}
+			catch (Exception ex) when (ex is HttpRequestException or IOException or SocketException) {
+				// dnSpy is gone. Say so once and the same way every time: without this, the first test
+				// after a crash fails on a transport error and every later one fails on something that
+				// looks unrelated, which reads as twenty broken tests instead of one dead debugger.
+				serverGone = true;
+				throw new DbgServerGoneException(tool, ex);
+			}
+			if (res.Json["error"] is not null)
+				throw new InvalidOperationException($"{tool}: protocol error {res.Json["error"]}");
+			if (res.ToolIsError)
+				throw new DbgToolException(tool, res.ToolText);
+			return res.ToolText;
+		}
+
+		/// <summary>Calls a tool, returning its error text instead of throwing.</summary>
+		public static string CallExpectingError(string tool, JObject? args = null) {
+			try {
+				var text = Call(tool, args);
+				throw new InvalidOperationException($"{tool} unexpectedly succeeded: {text}");
+			}
+			catch (DbgToolException ex) {
+				return ex.ToolMessage;
+			}
+		}
+
+		public static JObject CallJson(string tool, JObject? args = null) => JObject.Parse(Call(tool, args));
+		public static JArray CallArray(string tool, JObject? args = null) => JArray.Parse(Call(tool, args));
+
+		public static JObject Status() => CallJson("dbg_status");
+
+		/// <summary>
+		/// Resolves a method name to its metadata token by asking the server, then clears the
+		/// breakpoints that lookup created. Hard-coding a token would silently target whatever method
+		/// happens to occupy that row after any edit to the fixture.
+		/// </summary>
+		public static string TokenOf(string method, string? module = null, int overloadIndex = 0) {
+			module ??= FixtureDll();
+			var bps = CallArray("bp_add_method", new JObject { ["module"] = module, ["method"] = method });
+			var token = (string)bps[overloadIndex]["token"]!;
+			Call("bp_remove", new JObject { ["all"] = true });
+			return token;
+		}
+
+		/// <summary>Hit count reads as null until a session is running; treat that as zero.</summary>
+		public static int HitCount(JToken breakpoint) => (int?)breakpoint["hitCount"] ?? 0;
+
+		/// <summary>
+		/// Reads a formatted value as a number. The extension asks for decimal, but assert on the
+		/// numeric value rather than its spelling so these tests check the debugger, not the formatter.
+		/// </summary>
+		public static long Number(JToken? value) {
+			var text = ((string?)value)?.Trim()
+				?? throw new InvalidOperationException("value was null");
+			return text.StartsWith("0x", StringComparison.OrdinalIgnoreCase)
+				? Convert.ToInt64(text.Substring(2), 16)
+				: long.Parse(text, System.Globalization.CultureInfo.InvariantCulture);
+		}
+		public static bool IsDebugging => (bool)Status()["isDebugging"]!;
+		public static bool IsRunning => (bool)Status()["isRunning"]!;
+
+		/// <summary>
+		/// Drops all breakpoints and stops any session, so each test starts from a known state.
+		///
+		/// Resuming before stopping is precautionary, not proven necessary. dnSpy once died here with
+		/// an AccessViolationException: its own Locals window re-evaluates on every call stack change,
+		/// and that path reads the debuggee's PE image out of its memory, so terminating a paused
+		/// process let the refresh race the teardown — no MCP code in the stack. It has not recurred
+		/// since dbg_start stopped returning before a process exists (65 measured stop-while-paused
+		/// iterations, zero crashes; see tests/bisect-stop-crash.ps1). Kept because it costs nothing
+		/// and the failure it guards against takes the whole app down.
+		/// </summary>
+		public static void Reset() {
+			// Stated again at the destructive entry point even though Call/TryCall already enforce it:
+			// this is the line that deletes breakpoints, so the guarantee should be readable here.
+			SafetyGate.Enforce();
+			TryCall("bp_remove", new JObject { ["all"] = true });
+			TryCall("mbp_remove", new JObject { ["all"] = true });
+			if (!IsDebugging)
+				return;
+
+			if (!IsRunning) {
+				TryCall("dbg_continue");
+				WaitUntil(() => IsRunning, 5000);
+			}
+			TryCall("dbg_stop");
+			// Wait for the process list to empty, not just for isDebugging: a debuggee that outlives
+			// the session keeps the engine busy and makes the next test's stop look like it hung.
+			WaitUntil(() => !IsDebugging && ((JArray)Status()["processes"]!).Count == 0, 20000);
+			// Let the UI drain the queued frames-changed work before the next test repopulates it.
+			Thread.Sleep(750);
+		}
+
+		public static void TryCall(string tool, JObject? args = null) {
+			// Enforced outside the catch: "best effort" applies to cleanup failures, never to a
+			// refusal to touch the user's real dnSpy profile.
+			SafetyGate.Enforce();
+			try { Call(tool, args); }
+			catch (Exception) { /* best-effort cleanup */ }
+		}
+
+		public static bool WaitUntil(Func<bool> condition, int timeoutMs) {
+			var deadline = Environment.TickCount64 + timeoutMs;
+			while (Environment.TickCount64 < deadline) {
+				try {
+					if (condition())
+						return true;
+				}
+				catch (DbgUnsafeTargetException) {
+					throw; // a refusal is never transient, and must not be polled away
+				}
+				catch (DbgServerGoneException) {
+					throw; // neither is a dead debugger — polling it just burns the timeout
+				}
+				catch (Exception) {
+					// Transient while the engine is starting or tearing down.
+				}
+				Thread.Sleep(100);
+			}
+			return false;
+		}
+
+		/// <summary>
+		/// Blocks until a process pauses, returning the paused-state payload.
+		///
+		/// Also waits for the stack to materialise. dbg_wait_for_break returns the moment the engine
+		/// reports "not running", which is a little before the frames are readable — long enough that
+		/// an immediate dbg_locals or dbg_eval intermittently fails with "frame index 0 out of range
+		/// (0 frames)". Tests want "paused and inspectable", so wait for that here rather than making
+		/// every caller retry.
+		/// </summary>
+		public static JObject WaitForBreak(int timeoutMs = 30000) {
+			var text = Call("dbg_wait_for_break", new JObject { ["timeout_ms"] = timeoutMs });
+			if (text.StartsWith("timeout", StringComparison.Ordinal))
+				throw new TimeoutException("no process paused: " + text);
+			WaitUntil(HasFrames, 15000);
+			return JObject.Parse(text);
+		}
+
+		/// <summary>True once the paused thread reports at least one stack frame.</summary>
+		public static bool HasFrames() {
+			try {
+				return ((JArray)CallJson("dbg_callstack", new JObject { ["max_frames"] = 1 })["frames"]!).Count > 0;
+			}
+			catch (DbgToolException) {
+				return false;
+			}
+		}
+	}
+
+	sealed class DbgToolException : Exception {
+		public string ToolMessage { get; }
+		public DbgToolException(string tool, string message) : base($"{tool}: {message}") => ToolMessage = message;
+	}
+
+	/// <summary>
+	/// dnSpy stopped answering mid-run. Almost always a crash rather than a shutdown: dnSpy's own
+	/// Locals window re-evaluates on every call stack change and reads the debuggee's PE image out of
+	/// its memory, which faults when a process is torn down under it. Check the Windows Application
+	/// event log for dnSpy.exe with 0xC0000005 or 0xC0000374.
+	/// </summary>
+	sealed class DbgServerGoneException : Exception {
+		public DbgServerGoneException(string tool, Exception? inner)
+			: base($"dnSpy is no longer answering (during {tool}) — it most likely crashed. " +
+				"Check the Windows Application event log for dnSpy.exe 0xC0000005 / 0xC0000374. " +
+				"Every later failure in this run is a consequence of this, not a separate defect.", inner) { }
+	}
+}

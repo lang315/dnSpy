@@ -1,0 +1,522 @@
+using System;
+using System.Linq;
+using Newtonsoft.Json.Linq;
+using Xunit;
+
+namespace dnSpy.MCP.IntegrationTests {
+	/// <summary>
+	/// Static analysis tools: decompile, list_types, list_methods. These need the decompiler and the
+	/// document service but NOT a debug session — an agent can read and explore an assembly on disk
+	/// without ever launching it. Every test here runs against the fixture with nothing debugging,
+	/// which is also the property that makes them safe and fast.
+	/// </summary>
+	[Collection("dnSpy")]
+	public class StaticIntegrationTests : IDisposable {
+		public StaticIntegrationTests() => Dbg.Reset();
+		public void Dispose() => Dbg.Reset();
+
+		[DbgFact]
+		public void Types_are_listed_with_tokens_and_kinds() {
+			var res = Dbg.CallJson("list_types", new JObject {
+				["module"] = Dbg.FixtureDll(),
+				["filter"] = "DbgTest.*",
+			});
+			var types = (JArray)res["types"]!;
+
+			var program = types.FirstOrDefault(t => (string?)t["name"] == "DbgTest.Program");
+			Assert.NotNull(program);
+			Assert.StartsWith("0x02", (string?)program!["token"]); // TypeDef tokens start 0x02
+			Assert.Equal("class", (string?)program["kind"]);
+			Assert.Contains(types, t => (string?)t["name"] == "DbgTest.Node");
+		}
+
+		[DbgFact]
+		public void The_type_filter_is_a_wildcard() {
+			var all = (long)Dbg.CallJson("list_types", new JObject { ["module"] = Dbg.FixtureDll() })["matched"]!;
+			var filtered = (long)Dbg.CallJson("list_types", new JObject {
+				["module"] = Dbg.FixtureDll(),
+				["filter"] = "DbgTest.Outer*",
+			})["matched"]!;
+
+			Assert.True(filtered >= 2, "expected Outer and Outer.Inner"); // Outer, Outer+Inner
+			Assert.True(filtered < all, "the filter should not match every type in the module");
+		}
+
+		[DbgFact]
+		public void Methods_are_listed_with_the_same_tokens_the_debugger_uses() {
+			var res = Dbg.CallJson("list_methods", new JObject {
+				["module"] = Dbg.FixtureDll(),
+				["type"] = "DbgTest.Program",
+			});
+			var methods = (JArray)res["methods"]!;
+
+			// Program.Add has two overloads; both must appear with method tokens (0x06...).
+			var adds = methods.Where(m => (string?)m["name"] == "Add").ToArray();
+			Assert.Equal(2, adds.Length);
+			Assert.All(adds, m => Assert.StartsWith("0x06", (string?)m["token"]));
+			Assert.All(adds, m => Assert.True((bool?)m["static"]));
+
+			// The token list_methods reports must be the one bp_add_method resolves the name to.
+			var byName = Dbg.TokenOf("DbgTest.Program.Add"); // first overload
+			Assert.Contains(adds, m => (string?)m["token"] == byName);
+		}
+
+		[DbgFact]
+		public void A_method_is_decompiled_to_csharp_by_name() {
+			var src = Dbg.Call("decompile", new JObject {
+				["module"] = Dbg.FixtureDll(),
+				["method"] = "DbgTest.Program.Add",
+			});
+
+			// Both overloads, decompiled to real C#.
+			Assert.Contains("int Add(int a, int b)", src);
+			Assert.Contains("return a + b;", src);
+			Assert.Contains("int Add(int a, int b, int c)", src);
+			Assert.Contains("return a + b + c;", src);
+		}
+
+		[DbgFact]
+		public void A_member_is_decompiled_by_metadata_token() {
+			// Discover the token the way an agent would, then decompile it — the two tools compose.
+			var methods = (JArray)Dbg.CallJson("list_methods", new JObject {
+				["module"] = Dbg.FixtureDll(),
+				["type"] = "DbgTest.Program",
+			})["methods"]!;
+			var level3 = methods.First(m => (string?)m["name"] == "Level3");
+
+			var src = Dbg.Call("decompile", new JObject {
+				["module"] = Dbg.FixtureDll(),
+				["token"] = (string?)level3["token"],
+			});
+
+			Assert.Contains("Level3", src);
+			Assert.Contains("three + 100", src);
+		}
+
+		[DbgFact]
+		public void A_whole_type_can_be_decompiled() {
+			var src = Dbg.Call("decompile", new JObject {
+				["module"] = Dbg.FixtureDll(),
+				["type"] = "DbgTest.Outer",
+			});
+
+			// The nested Inner.Ping is part of the type.
+			Assert.Contains("Inner", src);
+			Assert.Contains("pong", src);
+		}
+
+		// The headline property: none of this needs a running process.
+		[DbgFact]
+		public void Decompiling_needs_no_debug_session() {
+			Assert.False((bool)Dbg.Status()["isDebugging"]!, "precondition: nothing is debugging");
+
+			var src = Dbg.Call("decompile", new JObject {
+				["module"] = Dbg.FixtureDll(),
+				["method"] = "DbgTest.Program.Level1",
+			});
+
+			Assert.Contains("Level2", src); // Level1 calls Level2
+			Assert.False((bool)Dbg.Status()["isDebugging"]!, "decompile must not have started a session");
+		}
+
+		[DbgFact]
+		public void An_unknown_module_is_reported() {
+			var error = Dbg.CallExpectingError("list_types", new JObject { ["module"] = "no-such.dll" });
+			Assert.Contains("no-such.dll", error);
+		}
+
+		[DbgFact]
+		public void An_unknown_type_is_reported() {
+			var error = Dbg.CallExpectingError("list_methods", new JObject {
+				["module"] = Dbg.FixtureDll(),
+				["type"] = "DbgTest.NoSuchType",
+			});
+			Assert.Contains("NoSuchType", error);
+		}
+
+		[DbgFact]
+		public void Decompile_requires_a_selector() {
+			var error = Dbg.CallExpectingError("decompile", new JObject { ["module"] = Dbg.FixtureDll() });
+			Assert.Contains("method", error, StringComparison.OrdinalIgnoreCase);
+		}
+
+		// ---- format=il ----
+
+		[DbgFact]
+		public void A_method_can_be_disassembled_to_il() {
+			var il = Dbg.Call("decompile", new JObject {
+				["module"] = Dbg.FixtureDll(),
+				["method"] = "DbgTest.Program.Add",
+				["format"] = "il",
+			});
+
+			// IL, not C#: opcodes and a stack directive, and no C# 'return a + b;'.
+			Assert.Contains(".maxstack", il);
+			Assert.Contains("ldarg", il);
+			Assert.Contains("ret", il);
+			Assert.DoesNotContain("return a + b;", il);
+		}
+
+		[DbgFact]
+		public void An_unknown_format_is_rejected() {
+			var error = Dbg.CallExpectingError("decompile", new JObject {
+				["module"] = Dbg.FixtureDll(),
+				["method"] = "DbgTest.Program.Add",
+				["format"] = "python",
+			});
+			Assert.Contains("format", error, StringComparison.OrdinalIgnoreCase);
+		}
+
+		// ---- search ----
+
+		[DbgFact]
+		public void A_string_literal_is_found_with_the_method_that_uses_it() {
+			var res = Dbg.CallJson("search", new JObject {
+				["module"] = Dbg.FixtureDll(),
+				["query"] = "hello",
+				["kind"] = "strings",
+			});
+			var hits = (JArray)res["hits"]!;
+
+			// The fixture loads "hello" in Inspect; the hit carries the method and its token.
+			var hit = hits.FirstOrDefault(h => (string?)h["kind"] == "string");
+			Assert.NotNull(hit);
+			Assert.Equal("hello", (string?)hit!["value"]);
+			Assert.Contains("Inspect", (string?)hit["name"]);
+			Assert.StartsWith("0x06", (string?)hit["token"]);
+		}
+
+		[DbgFact]
+		public void Member_names_are_found_by_dotted_pattern_and_by_simple_name() {
+			var byDotted = (JArray)Dbg.CallJson("search", new JObject {
+				["module"] = Dbg.FixtureDll(),
+				["query"] = "*.Level*",
+				["kind"] = "names",
+			})["hits"]!;
+			// The signature form uses '::', which a dotted query would miss — this proves the friendly
+			// match. Level1/Level2/Level3 are all methods.
+			Assert.Equal(3, byDotted.Count(h => (string?)h["kind"] == "method"));
+			Assert.All(byDotted.Where(h => (string?)h["kind"] == "method"),
+				h => Assert.Contains("DbgTest.Program.Level", (string?)h["name"]));
+
+			var bySimple = (JArray)Dbg.CallJson("search", new JObject {
+				["module"] = Dbg.FixtureDll(),
+				["query"] = "Level?",
+				["kind"] = "names",
+			})["hits"]!;
+			Assert.Equal(3, bySimple.Count(h => (string?)h["kind"] == "method"));
+		}
+
+		// The token a name search reports drives decompile — the tools compose.
+		[DbgFact]
+		public void A_search_hit_token_decompiles() {
+			var hit = ((JArray)Dbg.CallJson("search", new JObject {
+				["module"] = Dbg.FixtureDll(),
+				["query"] = "*.Level3",
+				["kind"] = "names",
+			})["hits"]!).First(h => (string?)h["kind"] == "method");
+
+			var src = Dbg.Call("decompile", new JObject {
+				["module"] = Dbg.FixtureDll(),
+				["token"] = (string?)hit["token"],
+			});
+			Assert.Contains("three + 100", src);
+		}
+
+		// ---- find_references ----
+
+		[DbgFact]
+		public void The_callers_of_a_method_are_found() {
+			var res = Dbg.CallJson("find_references", new JObject {
+				["module"] = Dbg.FixtureDll(),
+				["method"] = "DbgTest.Program.Level2",
+			});
+			var callers = (JArray)res["callers"]!;
+
+			// Only Level1 calls Level2 in the fixture.
+			Assert.Contains(callers, c => ((string?)c["caller"])?.Contains("Level1") == true);
+			Assert.All(callers, c => Assert.StartsWith("0x", (string?)c["ilOffset"]));
+			Assert.True((long)res["scannedMethods"]! > 0);
+		}
+
+		[DbgFact]
+		public void Callers_can_be_found_by_target_token() {
+			var addToken = Dbg.TokenOf("DbgTest.Program.Add");
+			var callers = (JArray)Dbg.CallJson("find_references", new JObject {
+				["module"] = Dbg.FixtureDll(),
+				["token"] = addToken,
+			})["callers"]!;
+
+			// Main calls Add in the loop.
+			Assert.Contains(callers, c => ((string?)c["caller"])?.Contains("Main") == true);
+		}
+
+		[DbgFact]
+		public void Find_references_requires_a_target() {
+			var error = Dbg.CallExpectingError("find_references", new JObject { ["module"] = Dbg.FixtureDll() });
+			Assert.Contains("method", error, StringComparison.OrdinalIgnoreCase);
+		}
+
+		// ---- find_implementations ----
+
+		[DbgFact]
+		public void Interface_implementations_are_found() {
+			var res = Dbg.CallJson("find_implementations", new JObject {
+				["module"] = Dbg.FixtureDll(),
+				["method"] = "DbgTest.IGreeter.Greet",
+			});
+			Assert.Equal("interface", (string?)res["targetKind"]);
+			var impls = (JArray)res["implementations"]!;
+
+			// Exactly two concrete types implement IGreeter.Greet, both implicitly (no explicit .override).
+			var iface = impls.Where(i => (string?)i["kind"] == "interface").ToArray();
+			Assert.Equal(2, iface.Length);
+			Assert.Contains(iface, i => (string?)i["type"] == "DbgTest.EnglishGreeter");
+			Assert.Contains(iface, i => (string?)i["type"] == "DbgTest.FrenchGreeter");
+			Assert.All(iface, i => Assert.StartsWith("0x06", (string?)i["token"]));
+		}
+
+		[DbgFact]
+		public void A_virtual_override_is_found() {
+			var res = Dbg.CallJson("find_implementations", new JObject {
+				["module"] = Dbg.FixtureDll(),
+				["method"] = "DbgTest.Animal.Speak",
+			});
+			Assert.Equal("virtual", (string?)res["targetKind"]);
+			var impls = (JArray)res["implementations"]!;
+
+			// Only Dog overrides Animal.Speak.
+			var overrides = impls.Where(i => (string?)i["kind"] == "override").ToArray();
+			Assert.Single(overrides);
+			Assert.Equal("DbgTest.Dog", (string?)overrides[0]["type"]);
+			// `implements` is the target's dnlib signature form, e.g. "System.String DbgTest.Animal::Speak()".
+			Assert.Contains("DbgTest.Animal::Speak", (string?)overrides[0]["implements"]);
+		}
+
+		// The token find_implementations reports composes back into decompile — and the target can be a token too.
+		[DbgFact]
+		public void Implementations_can_be_found_by_token() {
+			var greet = ((JArray)Dbg.CallJson("list_methods", new JObject {
+				["module"] = Dbg.FixtureDll(),
+				["type"] = "DbgTest.IGreeter",
+			})["methods"]!).First(m => (string?)m["name"] == "Greet");
+
+			var impls = (JArray)Dbg.CallJson("find_implementations", new JObject {
+				["module"] = Dbg.FixtureDll(),
+				["token"] = (string?)greet["token"],
+			})["implementations"]!;
+			Assert.Equal(2, impls.Count(i => (string?)i["kind"] == "interface"));
+		}
+
+		[DbgFact]
+		public void Find_implementations_requires_a_target() {
+			var error = Dbg.CallExpectingError("find_implementations", new JObject { ["module"] = Dbg.FixtureDll() });
+			Assert.Contains("method", error, StringComparison.OrdinalIgnoreCase);
+		}
+
+		// ---- extract_iocs ----
+
+		[DbgFact]
+		public void Iocs_are_extracted_and_attributed_to_their_method() {
+			var iocs = (JArray)Dbg.CallJson("extract_iocs", new JObject { ["module"] = Dbg.FixtureDll() })["iocs"]!;
+
+			void Has(string category, string value, string method) {
+				var hit = iocs.FirstOrDefault(i => (string?)i["category"] == category && (string?)i["value"] == value);
+				Assert.True(hit is not null, $"expected {category} '{value}'");
+				Assert.Contains(method, (string?)hit!["method"]);
+				Assert.StartsWith("0x06", (string?)hit["token"]);
+			}
+
+			Has("url", "http://example.com/beacon", "Indicators");
+			Has("ip", "192.168.10.50", "Indicators");
+			Has("registry", "HKLM\\SOFTWARE\\DbgTest\\Config", "Indicators");
+			Has("path", "C:\\Windows\\Temp\\payload.bin", "Indicators");
+			Has("email", "operator@dbgtest.invalid", "Indicators");
+			Has("pinvoke", "kernel32.dll!GetTickCount", "NativeGetTickCount");
+		}
+
+		[DbgFact]
+		public void Base64_is_opt_in_not_part_of_the_default_sweep() {
+			var names = ((JArray)Dbg.CallJson("extract_iocs", new JObject { ["module"] = Dbg.FixtureDll() })["categories"]!)
+				.Select(c => (string?)c).ToArray();
+			Assert.Contains("url", names);
+			Assert.Contains("pinvoke", names);
+			Assert.DoesNotContain("base64", names); // noisy, so extracted only when explicitly requested
+		}
+
+		[DbgFact]
+		public void The_category_filter_narrows_the_sweep() {
+			var iocs = (JArray)Dbg.CallJson("extract_iocs", new JObject {
+				["module"] = Dbg.FixtureDll(),
+				["categories"] = "email",
+			})["iocs"]!;
+
+			Assert.NotEmpty(iocs);
+			Assert.All(iocs, i => Assert.Equal("email", (string?)i["category"]));
+		}
+
+		[DbgFact]
+		public void An_unknown_ioc_category_is_rejected() {
+			var error = Dbg.CallExpectingError("extract_iocs", new JObject {
+				["module"] = Dbg.FixtureDll(),
+				["categories"] = "malware",
+			});
+			Assert.Contains("category", error, StringComparison.OrdinalIgnoreCase);
+		}
+
+		// ---- find_references: fields ----
+
+		[DbgFact]
+		public void Field_reads_and_writes_are_found() {
+			var res = Dbg.CallJson("find_references", new JObject {
+				["module"] = Dbg.FixtureDll(),
+				["field"] = "DbgTest.Program.State",
+			});
+			Assert.Equal("field", (string?)res["targetKind"]);
+			var refs = (JArray)res["references"]!;
+
+			// State is written by SetState and read by ReadState (distinct methods).
+			Assert.Contains(refs, r => ((string?)r["method"])?.EndsWith(".SetState") == true && (string?)r["access"] == "write");
+			Assert.Contains(refs, r => ((string?)r["method"])?.EndsWith(".ReadState") == true && (string?)r["access"] == "read");
+			Assert.All(refs, r => Assert.StartsWith("0x", (string?)r["ilOffset"]));
+		}
+
+		[DbgFact]
+		public void The_field_access_filter_narrows_to_writes() {
+			var refs = (JArray)Dbg.CallJson("find_references", new JObject {
+				["module"] = Dbg.FixtureDll(),
+				["field"] = "DbgTest.Program.State",
+				["access"] = "writes",
+			})["references"]!;
+
+			Assert.NotEmpty(refs);
+			Assert.All(refs, r => Assert.Equal("write", (string?)r["access"]));
+			Assert.Contains(refs, r => ((string?)r["method"])?.EndsWith(".SetState") == true);
+		}
+
+		// A token target auto-detects that it is a field (0x04...), not a method.
+		[DbgFact]
+		public void Field_references_can_be_found_by_token() {
+			var stateToken = (string?)((JArray)Dbg.CallJson("search", new JObject {
+				["module"] = Dbg.FixtureDll(),
+				["query"] = "State",
+				["kind"] = "names",
+			})["hits"]!).First(h => (string?)h["kind"] == "field")["token"];
+			Assert.StartsWith("0x04", stateToken); // FieldDef tokens start 0x04
+
+			var res = Dbg.CallJson("find_references", new JObject {
+				["module"] = Dbg.FixtureDll(),
+				["token"] = stateToken,
+			});
+			Assert.Equal("field", (string?)res["targetKind"]);
+			Assert.NotEmpty((JArray)res["references"]!);
+		}
+
+		// ---- find_references: types ----
+
+		[DbgFact]
+		public void Type_uses_are_found() {
+			var res = Dbg.CallJson("find_references", new JObject {
+				["module"] = Dbg.FixtureDll(),
+				["type"] = "DbgTest.Node",
+			});
+			Assert.Equal("type", (string?)res["targetKind"]);
+			var refs = (JArray)res["references"]!;
+
+			// Inspect and BuildGraph both use Node (construct / return it).
+			Assert.Contains(refs, r => ((string?)r["method"])?.Contains("Inspect") == true);
+			Assert.Contains(refs, r => ((string?)r["method"])?.Contains("BuildGraph") == true);
+		}
+
+		// ---- type_hierarchy ----
+
+		[DbgFact]
+		public void Base_types_are_listed() {
+			var res = Dbg.CallJson("type_hierarchy", new JObject {
+				["module"] = Dbg.FixtureDll(),
+				["type"] = "DbgTest.Dog",
+				["direction"] = "base",
+			});
+			var bases = ((JArray)res["baseTypes"]!).Select(b => (string?)b["name"]).ToArray();
+			Assert.Contains("DbgTest.Animal", bases);
+			Assert.Contains("System.Object", bases);
+		}
+
+		[DbgFact]
+		public void Derived_types_are_found() {
+			var dogFromAnimal = ((JArray)Dbg.CallJson("type_hierarchy", new JObject {
+				["module"] = Dbg.FixtureDll(),
+				["type"] = "DbgTest.Animal",
+				["direction"] = "derived",
+			})["derivedTypes"]!).Select(d => (string?)d["name"]).ToArray();
+			Assert.Contains("DbgTest.Dog", dogFromAnimal);
+
+			// An interface target finds its implementers too.
+			var greeters = ((JArray)Dbg.CallJson("type_hierarchy", new JObject {
+				["module"] = Dbg.FixtureDll(),
+				["type"] = "DbgTest.IGreeter",
+				["direction"] = "derived",
+			})["derivedTypes"]!).Select(d => (string?)d["name"]).ToArray();
+			Assert.Contains("DbgTest.EnglishGreeter", greeters);
+			Assert.Contains("DbgTest.FrenchGreeter", greeters);
+		}
+
+		// ---- resources ----
+
+		[DbgFact]
+		public void Manifest_resources_are_listed() {
+			var res = Dbg.CallJson("list_resources", new JObject { ["module"] = Dbg.FixtureDll() });
+			var rs = (JArray)res["resources"]!;
+			var embedded = rs.FirstOrDefault(r => (string?)r["name"] == "dbgtest.embedded.txt");
+			Assert.NotNull(embedded);
+			Assert.Equal("Embedded", (string?)embedded!["type"]);
+			Assert.True((int)embedded["length"]! > 0);
+		}
+
+		[DbgFact]
+		public void An_embedded_resource_is_extracted_inline() {
+			var res = Dbg.CallJson("extract_resource", new JObject {
+				["module"] = Dbg.FixtureDll(),
+				["name"] = "dbgtest.embedded.txt",
+			});
+			Assert.Contains("dbgtest-embedded-payload", (string?)res["text"]);
+		}
+
+		[DbgFact]
+		public void A_resource_can_be_saved_to_disk() {
+			var tmp = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "dbgtest-res-" + Guid.NewGuid().ToString("N") + ".txt");
+			try {
+				var res = Dbg.CallJson("extract_resource", new JObject {
+					["module"] = Dbg.FixtureDll(),
+					["name"] = "dbgtest.embedded.txt",
+					["save_path"] = tmp,
+				});
+				Assert.Equal(tmp, (string?)res["savedTo"]);
+				Assert.True(System.IO.File.Exists(tmp));
+				Assert.Contains("dbgtest-embedded-payload", System.IO.File.ReadAllText(tmp));
+			}
+			finally {
+				if (System.IO.File.Exists(tmp)) System.IO.File.Delete(tmp);
+			}
+		}
+
+		[DbgFact]
+		public void An_unknown_resource_is_reported() {
+			var error = Dbg.CallExpectingError("extract_resource", new JObject {
+				["module"] = Dbg.FixtureDll(),
+				["name"] = "no.such.resource",
+			});
+			Assert.Contains("resource", error, StringComparison.OrdinalIgnoreCase);
+		}
+
+		// A module path with forward slashes (as JSON callers routinely send) resolves.
+		[DbgFact]
+		public void A_module_path_with_forward_slashes_resolves() {
+			var types = (JArray)Dbg.CallJson("list_types", new JObject {
+				["module"] = Dbg.FixtureDll().Replace('\\', '/'),
+				["filter"] = "DbgTest.*",
+			})["types"]!;
+			Assert.Contains(types, t => (string?)t["name"] == "DbgTest.Program");
+		}
+	}
+}
